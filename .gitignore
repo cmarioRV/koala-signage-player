@@ -60,3 +60,9 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+config/config.json
+content/
+logs/
+.build/
+.release/
