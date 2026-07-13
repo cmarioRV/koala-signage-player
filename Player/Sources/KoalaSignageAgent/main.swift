@@ -88,10 +88,16 @@ struct HeartbeatRequest: Encodable {
 
 struct PersistedState: Codable {
     var playerID: UUID?
+    var installedPlaylistID: UUID?
     var installedPlaylistVersion: Int?
 
-    init(playerID: UUID?, installedPlaylistVersion: Int? = nil) {
+    init(
+        playerID: UUID?,
+        installedPlaylistID: UUID? = nil,
+        installedPlaylistVersion: Int? = nil
+    ) {
         self.playerID = playerID
+        self.installedPlaylistID = installedPlaylistID
         self.installedPlaylistVersion = installedPlaylistVersion
     }
 }
@@ -120,11 +126,24 @@ enum ManifestVersionComparison: Equatable {
     case localVersionAhead
 }
 
-func compareManifestVersion(installed: Int?, remote: Int) -> ManifestVersionComparison {
-    guard let installed else { return .updateAvailable }
-    if remote > installed { return .updateAvailable }
-    if remote == installed { return .upToDate }
+func compareManifest(
+    installedPlaylistID: UUID?,
+    installedVersion: Int?,
+    remotePlaylistID: UUID,
+    remoteVersion: Int
+) -> ManifestVersionComparison {
+    guard installedPlaylistID == remotePlaylistID, let installedVersion else {
+        return .updateAvailable
+    }
+    if remoteVersion > installedVersion { return .updateAvailable }
+    if remoteVersion == installedVersion { return .upToDate }
     return .localVersionAhead
+}
+
+func shouldRestoreRemotePlaylist(state: PersistedState, playlistIsUsable: Bool) -> Bool {
+    state.installedPlaylistID != nil
+        && state.installedPlaylistVersion != nil
+        && playlistIsUsable
 }
 
 enum AgentError: Error, CustomStringConvertible {
@@ -141,6 +160,10 @@ enum AgentError: Error, CustomStringConvertible {
     case checksumToolFailed(Int32)
     case invalidChecksumOutput
     case checksumMismatch(filename: String)
+    case emptyManifest
+    case duplicateManifestPosition(Int)
+    case conflictingManifestFilename(String)
+    case assetNotReady(String)
 
     var description: String {
         switch self {
@@ -158,6 +181,10 @@ enum AgentError: Error, CustomStringConvertible {
         case .checksumToolFailed(let status): return "SHA-256 tool failed with status \(status)."
         case .invalidChecksumOutput: return "SHA-256 tool returned invalid output."
         case .checksumMismatch(let filename): return "SHA-256 mismatch for \(filename)."
+        case .emptyManifest: return "The remote manifest contains no assets."
+        case .duplicateManifestPosition(let position): return "Duplicate manifest position: \(position)."
+        case .conflictingManifestFilename(let filename): return "Conflicting manifest filename: \(filename)."
+        case .assetNotReady(let filename): return "No verified local source is available for \(filename)."
         }
     }
 }
@@ -169,10 +196,21 @@ struct Logger {
     }
 }
 
+final class CriticalSection: @unchecked Sendable {
+    private let lock = NSLock()
+
+    func withLock<Result>(_ operation: () throws -> Result) rethrows -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
+    }
+}
+
 final class StateStore: @unchecked Sendable {
     private let path: String
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
+    private let access = CriticalSection()
 
     init(path: String) {
         self.path = path
@@ -180,21 +218,25 @@ final class StateStore: @unchecked Sendable {
     }
 
     func load() -> PersistedState {
-        guard let data = FileManager.default.contents(atPath: path),
-              let state = try? decoder.decode(PersistedState.self, from: data) else {
-            return PersistedState(playerID: nil)
+        access.withLock {
+            guard let data = FileManager.default.contents(atPath: path),
+                  let state = try? decoder.decode(PersistedState.self, from: data) else {
+                return PersistedState(playerID: nil)
+            }
+            return state
         }
-        return state
     }
 
     func save(_ state: PersistedState) throws {
-        let url = URL(fileURLWithPath: path)
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        let data = try encoder.encode(state)
-        try data.write(to: url, options: .atomic)
+        try access.withLock {
+            let url = URL(fileURLWithPath: path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try encoder.encode(state)
+            try data.write(to: url, options: .atomic)
+        }
     }
 }
 
@@ -297,14 +339,30 @@ final class PlaylistManager: @unchecked Sendable {
             logger.log("Content directory is empty; keeping the current playlist.")
             return
         }
+        try write(entries: snapshot.entries, description: "local")
+    }
+
+    func write(entries: [String], description: String) throws {
+        guard !entries.isEmpty else { throw AgentError.emptyManifest }
         let playlistURL = URL(fileURLWithPath: config.playlistPath)
         try FileManager.default.createDirectory(
             at: playlistURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let body = snapshot.entries.joined(separator: "\n") + "\n"
+        let body = entries.joined(separator: "\n") + "\n"
         try body.write(to: playlistURL, atomically: true, encoding: .utf8)
-        logger.log("Playlist generated with \(snapshot.entries.count) file(s).")
+        logger.log("\(description.capitalized) playlist generated with \(entries.count) file(s).")
+    }
+
+    func currentPlaylistIsUsable() -> Bool {
+        guard let body = try? String(contentsOfFile: config.playlistPath, encoding: .utf8) else {
+            return false
+        }
+        let entries = body
+            .split(whereSeparator: { $0.isNewline })
+            .map(String.init)
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        return !entries.isEmpty && entries.allSatisfy { FileManager.default.fileExists(atPath: $0) }
     }
 }
 
@@ -426,6 +484,13 @@ struct DownloadSummary: Equatable, Sendable {
     var failed = 0
 }
 
+struct PreparedRelease: Equatable, Sendable {
+    let playlistID: UUID
+    let version: Int
+    let directory: String
+    let entries: [String]
+}
+
 func normalizedSHA256(_ value: String) -> String? {
     let normalized = value.lowercased()
     guard normalized.utf8.count == 64,
@@ -478,8 +543,10 @@ func safeManifestFilename(_ filename: String) -> String? {
     guard !filename.isEmpty,
           filename != ".",
           filename != "..",
+          !filename.hasPrefix("#"),
           !filename.contains("/"),
           !filename.contains("\\"),
+          !filename.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
           URL(fileURLWithPath: filename).lastPathComponent == filename else {
         return nil
     }
@@ -512,6 +579,11 @@ actor DownloadManager {
         let size: Int64
         let modificationDate: Date?
         let expectedSHA256: String
+    }
+
+    private struct ManifestFileDefinition: Equatable {
+        let size: Int64
+        let checksum: String
     }
 
     private let baseURL: URL
@@ -587,6 +659,125 @@ actor DownloadManager {
         }
 
         return summary
+    }
+
+    func prepareRelease(from manifest: ManifestResponse) throws -> PreparedRelease {
+        let sortedItems = manifest.items.sorted(by: { $0.position < $1.position })
+        guard !sortedItems.isEmpty else { throw AgentError.emptyManifest }
+
+        var positions = Set<Int>()
+        var definitions: [String: ManifestFileDefinition] = [:]
+        for item in sortedItems {
+            guard positions.insert(item.position).inserted else {
+                throw AgentError.duplicateManifestPosition(item.position)
+            }
+            let filename = try validatedFilename(for: item)
+            let definition = ManifestFileDefinition(
+                size: item.sizeBytes,
+                checksum: try validatedChecksum(for: item)
+            )
+            if let existing = definitions[filename], existing != definition {
+                throw AgentError.conflictingManifestFilename(filename)
+            }
+            definitions[filename] = definition
+        }
+
+        let releasesRoot = contentDirectory.appendingPathComponent(".remote", isDirectory: true)
+        try fileManager.createDirectory(at: releasesRoot, withIntermediateDirectories: true)
+        let releaseName = "\(manifest.playlistID.uuidString.lowercased())-v\(manifest.version)"
+        let preferredRelease = releasesRoot.appendingPathComponent(releaseName, isDirectory: true)
+
+        if try releaseContainsManifest(preferredRelease, items: sortedItems) {
+            logger.log("Verified release already exists: \(releaseName)")
+            return preparedRelease(manifest: manifest, directory: preferredRelease, items: sortedItems)
+        }
+
+        let temporaryRelease = releasesRoot.appendingPathComponent(
+            ".pending-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: temporaryRelease, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: temporaryRelease) }
+
+        for item in sortedItems {
+            let filename = try validatedFilename(for: item)
+            let destination = temporaryRelease.appendingPathComponent(filename, isDirectory: false)
+            if fileManager.fileExists(atPath: destination.path) { continue }
+
+            let checksum = try validatedChecksum(for: item)
+            let stagedSource = stagingDirectory.appendingPathComponent(filename, isDirectory: false)
+            let contentSource = contentDirectory.appendingPathComponent(filename, isDirectory: false)
+            let source: URL
+
+            if try fileMatchesManifest(
+                at: stagedSource,
+                expectedSize: item.sizeBytes,
+                expectedChecksum: checksum
+            ) {
+                source = stagedSource
+            } else if try fileMatchesManifest(
+                at: contentSource,
+                expectedSize: item.sizeBytes,
+                expectedChecksum: checksum
+            ) {
+                source = contentSource
+            } else {
+                throw AgentError.assetNotReady(filename)
+            }
+
+            try fileManager.copyItem(at: source, to: destination)
+            guard try fileMatchesManifest(
+                at: destination,
+                expectedSize: item.sizeBytes,
+                expectedChecksum: checksum
+            ) else {
+                throw AgentError.checksumMismatch(filename: filename)
+            }
+        }
+
+        let finalRelease: URL
+        if fileManager.fileExists(atPath: preferredRelease.path) {
+            finalRelease = releasesRoot.appendingPathComponent(
+                "\(releaseName)-\(UUID().uuidString.lowercased())",
+                isDirectory: true
+            )
+        } else {
+            finalRelease = preferredRelease
+        }
+        try fileManager.moveItem(at: temporaryRelease, to: finalRelease)
+        logger.log("Versioned release prepared: \(finalRelease.lastPathComponent)")
+        return preparedRelease(manifest: manifest, directory: finalRelease, items: sortedItems)
+    }
+
+    private func releaseContainsManifest(_ directory: URL, items: [ManifestItem]) throws -> Bool {
+        var verifiedFilenames = Set<String>()
+        for item in items {
+            let filename = try validatedFilename(for: item)
+            if !verifiedFilenames.insert(filename).inserted { continue }
+            guard try fileMatchesManifest(
+                at: directory.appendingPathComponent(filename, isDirectory: false),
+                expectedSize: item.sizeBytes,
+                expectedChecksum: try validatedChecksum(for: item)
+            ) else {
+                return false
+            }
+        }
+        return !items.isEmpty
+    }
+
+    private func preparedRelease(
+        manifest: ManifestResponse,
+        directory: URL,
+        items: [ManifestItem]
+    ) -> PreparedRelease {
+        PreparedRelease(
+            playlistID: manifest.playlistID,
+            version: manifest.version,
+            directory: directory.path,
+            entries: items.map {
+                directory.appendingPathComponent($0.filename, isDirectory: false).path
+            }
+        )
     }
 
     private func validatedFilename(for item: ManifestItem) throws -> String {
@@ -733,6 +924,7 @@ enum KoalaSignagePlayer {
             let playlistManager = PlaylistManager(config: config, logger: logger)
             let mpvManager = MPVManager(config: config, logger: logger)
             let stateStore = StateStore(path: config.stateFilePath)
+            let playbackUpdates = CriticalSection()
             let serverClient = try ServerClient(serverURL: config.serverURL)
             let downloadManager = try DownloadManager(
                 serverURL: config.serverURL,
@@ -741,12 +933,28 @@ enum KoalaSignagePlayer {
                 logger: logger
             )
 
+            var state = stateStore.load()
             var snapshot = try playlistManager.snapshot()
-            try playlistManager.write(snapshot)
+            if shouldRestoreRemotePlaylist(
+                state: state,
+                playlistIsUsable: playlistManager.currentPlaylistIsUsable()
+            ) {
+                logger.log(
+                    "Restoring installed remote playlist \(state.installedPlaylistID!.uuidString) "
+                    + "version \(state.installedPlaylistVersion!)."
+                )
+            } else {
+                if state.installedPlaylistID != nil || state.installedPlaylistVersion != nil {
+                    logger.log("Installed remote playlist state is incomplete; returning to local playback.")
+                    state.installedPlaylistID = nil
+                    state.installedPlaylistVersion = nil
+                    try stateStore.save(state)
+                }
+                try playlistManager.write(snapshot)
+            }
             try mpvManager.ensureRunning()
             try mpvManager.reloadPlaylist()
 
-            var state = stateStore.load()
             do {
                 let response = try await serverClient.register(
                     name: config.playerName,
@@ -787,25 +995,50 @@ enum KoalaSignagePlayer {
                     if let playerID = stateStore.load().playerID {
                         do {
                             let manifest = try await serverClient.fetchManifest(playerID: playerID)
-                            let installedVersion = stateStore.load().installedPlaylistVersion
+                            let installedState = stateStore.load()
+                            let installedVersion = installedState.installedPlaylistVersion
                             let installedDescription = installedVersion.map(String.init) ?? "none"
                             logger.log(
                                 "Manifest received. Remote version: \(manifest.version); "
                                 + "installed version: \(installedDescription); items: \(manifest.items.count)."
                             )
 
-                            switch compareManifestVersion(installed: installedVersion, remote: manifest.version) {
+                            switch compareManifest(
+                                installedPlaylistID: installedState.installedPlaylistID,
+                                installedVersion: installedVersion,
+                                remotePlaylistID: manifest.playlistID,
+                                remoteVersion: manifest.version
+                            ) {
                             case .updateAvailable:
                                 logger.log("Remote playlist update available; staging missing assets.")
                                 do {
                                     let summary = try await downloadManager.stageMissingAssets(from: manifest)
                                     logger.log(
                                         "Staging sync completed. Downloaded: \(summary.downloaded); "
-                                        + "skipped: \(summary.skipped); failed: \(summary.failed). "
-                                        + "Local playback was not changed."
+                                        + "skipped: \(summary.skipped); failed: \(summary.failed)."
                                     )
+                                    if summary.failed > 0 {
+                                        logger.log("Remote playlist was not activated because some assets failed.")
+                                    } else {
+                                        let release = try await downloadManager.prepareRelease(from: manifest)
+                                        try playbackUpdates.withLock {
+                                            try playlistManager.write(
+                                                entries: release.entries,
+                                                description: "remote"
+                                            )
+                                            try mpvManager.reloadPlaylist()
+                                            var installedState = stateStore.load()
+                                            installedState.installedPlaylistID = release.playlistID
+                                            installedState.installedPlaylistVersion = release.version
+                                            try stateStore.save(installedState)
+                                        }
+                                        logger.log(
+                                            "Remote playlist activated atomically: "
+                                            + "\(release.playlistID.uuidString) version \(release.version)."
+                                        )
+                                    }
                                 } catch {
-                                    logger.log("Staging sync failed; local playback is unaffected. Error: \(error)")
+                                    logger.log("Remote activation failed; previous playback remains available. Error: \(error)")
                                 }
                             case .upToDate:
                                 logger.log("Remote manifest matches the installed playlist version.")
@@ -823,13 +1056,17 @@ enum KoalaSignagePlayer {
             while true {
                 try await Task.sleep(for: .seconds(config.scanIntervalSeconds))
                 do {
-                    try mpvManager.ensureRunning()
-                    let updated = try playlistManager.snapshot()
-                    if updated != snapshot && !updated.entries.isEmpty {
-                        try playlistManager.write(updated)
-                        try mpvManager.reloadPlaylist()
-                        snapshot = updated
-                        logger.log("Content change detected; playlist reloaded.")
+                    try playbackUpdates.withLock {
+                        try mpvManager.ensureRunning()
+                        guard stateStore.load().installedPlaylistID == nil else { return }
+
+                        let updated = try playlistManager.snapshot()
+                        if updated != snapshot && !updated.entries.isEmpty {
+                            try playlistManager.write(updated)
+                            try mpvManager.reloadPlaylist()
+                            snapshot = updated
+                            logger.log("Content change detected; playlist reloaded.")
+                        }
                     }
                 } catch {
                     logger.log("Player maintenance error: \(error)")

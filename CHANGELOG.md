@@ -22,6 +22,11 @@ All notable changes to this project will be documented in this file.
 - Manifest filename and relative URL safety validation
 - SHA-256 validation for downloaded and existing assets
 - In-memory verification cache to avoid hashing unchanged files on every poll
+- Immutable versioned releases for complete remote manifests
+- Atomic remote playlist publication and MPV reload
+- Installed playlist identity and version persistence
+- Remote playlist restoration after service or device restart
+- Serialized local and remote playlist updates
 
 ### Changed
 

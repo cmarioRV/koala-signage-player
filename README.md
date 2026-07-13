@@ -40,12 +40,13 @@ Koala Signage
 * ✅ Remote manifest polling and version detection
 * ✅ Missing asset downloads into isolated staging storage
 * ✅ SHA-256 integrity verification
+* ✅ Atomic remote playlist activation
+* ✅ Remote playlist restoration after restart
 * ✅ Lightweight architecture
 
 ## Planned
 
 * ⏳ Remote content synchronization
-* ⏳ Manifest-based content installation
 * ⏳ Download retry and resume support
 * ⏳ Local content cache
 * ⏳ Playlist scheduling
@@ -159,7 +160,9 @@ When a newer manifest is available, missing assets are downloaded to an isolated
 "stagingDirectory": "/var/lib/koala-signage/staging"
 ```
 
-Downloads use a temporary `.part` file and must match both the expected byte size and SHA-256 checksum before becoming staged. Existing files are also checked before being skipped. Staged files are not moved into `content`, added to `current.m3u`, or loaded into MPV. Playlist activation remains a separate future increment.
+Downloads use a temporary `.part` file and must match both the expected byte size and SHA-256 checksum before becoming staged. Existing files are also checked before being skipped.
+
+Once every manifest item is verified, the player prepares an immutable versioned release under `content/.remote`, atomically replaces `current.m3u`, reloads MPV, and only then persists the installed playlist ID and version. The previous release is retained, and an installed remote playlist is restored after a service or device restart. Automatic cleanup of obsolete releases is intentionally deferred.
 
 ---
 
@@ -203,7 +206,8 @@ KoalaSignagePlayer
 * [x] Manifest polling and decoding
 * [x] Download missing assets to staging
 * [x] SHA-256 verification
-* [ ] Atomic playlist activation
+* [x] Atomic playlist activation
+* [x] Restore installed playlist after restart
 
 ## Phase 3 — Content Management
 

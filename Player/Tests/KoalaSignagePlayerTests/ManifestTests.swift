@@ -59,10 +59,39 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
 }
 
 @Test func comparesInstalledAndRemoteManifestVersions() {
-    #expect(compareManifestVersion(installed: nil, remote: 2) == .updateAvailable)
-    #expect(compareManifestVersion(installed: 1, remote: 2) == .updateAvailable)
-    #expect(compareManifestVersion(installed: 2, remote: 2) == .upToDate)
-    #expect(compareManifestVersion(installed: 3, remote: 2) == .localVersionAhead)
+    let installedPlaylistID = UUID()
+    let differentPlaylistID = UUID()
+
+    #expect(compareManifest(
+        installedPlaylistID: nil,
+        installedVersion: nil,
+        remotePlaylistID: installedPlaylistID,
+        remoteVersion: 2
+    ) == .updateAvailable)
+    #expect(compareManifest(
+        installedPlaylistID: installedPlaylistID,
+        installedVersion: 1,
+        remotePlaylistID: installedPlaylistID,
+        remoteVersion: 2
+    ) == .updateAvailable)
+    #expect(compareManifest(
+        installedPlaylistID: installedPlaylistID,
+        installedVersion: 2,
+        remotePlaylistID: installedPlaylistID,
+        remoteVersion: 2
+    ) == .upToDate)
+    #expect(compareManifest(
+        installedPlaylistID: installedPlaylistID,
+        installedVersion: 3,
+        remotePlaylistID: installedPlaylistID,
+        remoteVersion: 2
+    ) == .localVersionAhead)
+    #expect(compareManifest(
+        installedPlaylistID: installedPlaylistID,
+        installedVersion: 2,
+        remotePlaylistID: differentPlaylistID,
+        remoteVersion: 2
+    ) == .updateAvailable)
 }
 
 @Test func decodesLegacyStateWithoutInstalledPlaylistVersion() throws {
@@ -70,6 +99,7 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     let state = try JSONDecoder().decode(PersistedState.self, from: Data(json.utf8))
 
     #expect(state.playerID == UUID(uuidString: "4CD47053-E101-4D16-BEB1-201EBFF40D1E"))
+    #expect(state.installedPlaylistID == nil)
     #expect(state.installedPlaylistVersion == nil)
 }
 
@@ -101,6 +131,8 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     #expect(safeManifestFilename("../config.json") == nil)
     #expect(safeManifestFilename("nested/video.mp4") == nil)
     #expect(safeManifestFilename("nested\\video.mp4") == nil)
+    #expect(safeManifestFilename("#comment.mp4") == nil)
+    #expect(safeManifestFilename("video\nnext.mp4") == nil)
 }
 
 @Test func resolvesOnlyRelativeServerMediaURLs() throws {
@@ -165,12 +197,21 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
 
     let firstSummary = try await manager.stageMissingAssets(from: manifest)
     let secondSummary = try await manager.stageMissingAssets(from: manifest)
+    let release = try await manager.prepareRelease(from: manifest)
+    let reusedRelease = try await manager.prepareRelease(from: manifest)
 
     #expect(firstSummary == DownloadSummary(downloaded: 1, skipped: 0, failed: 0))
     #expect(secondSummary == DownloadSummary(downloaded: 0, skipped: 1, failed: 0))
     #expect(try Data(contentsOf: staging.appendingPathComponent("video.mp4")) == Data([0x01, 0x02, 0x03]))
     #expect(!FileManager.default.fileExists(atPath: content.appendingPathComponent("video.mp4").path))
     #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("video.mp4.part").path))
+    #expect(release.playlistID == manifest.playlistID)
+    #expect(release.version == manifest.version)
+    #expect(release.entries.count == 1)
+    #expect(reusedRelease == release)
+    #expect(release.entries[0].contains("/.remote/"))
+    #expect(try Data(contentsOf: URL(fileURLWithPath: release.entries[0])) == Data([0x01, 0x02, 0x03]))
+    #expect(FileManager.default.fileExists(atPath: staging.appendingPathComponent("video.mp4").path))
 }
 
 @Test func calculatesSHA256ForAFileWithoutLoadingItIntoThePlayer() throws {
@@ -229,4 +270,79 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     #expect(summary == DownloadSummary(downloaded: 0, skipped: 0, failed: 1))
     #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("corrupted.mp4").path))
     #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("corrupted.mp4.part").path))
+}
+
+@Test func persistsInstalledPlaylistIdentityAndVersion() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let stateFile = directory.appendingPathComponent("player-state.json")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let store = StateStore(path: stateFile.path)
+    let state = PersistedState(
+        playerID: UUID(),
+        installedPlaylistID: UUID(),
+        installedPlaylistVersion: 4
+    )
+    try store.save(state)
+
+    let restored = store.load()
+    #expect(restored.playerID == state.playerID)
+    #expect(restored.installedPlaylistID == state.installedPlaylistID)
+    #expect(restored.installedPlaylistVersion == 4)
+}
+
+@Test func restoresOnlyCompleteAndUsableRemotePlaylistState() {
+    let completeState = PersistedState(
+        playerID: UUID(),
+        installedPlaylistID: UUID(),
+        installedPlaylistVersion: 4
+    )
+    let incompleteState = PersistedState(
+        playerID: UUID(),
+        installedPlaylistID: nil,
+        installedPlaylistVersion: 4
+    )
+
+    #expect(shouldRestoreRemotePlaylist(state: completeState, playlistIsUsable: true))
+    #expect(!shouldRestoreRemotePlaylist(state: completeState, playlistIsUsable: false))
+    #expect(!shouldRestoreRemotePlaylist(state: incompleteState, playlistIsUsable: true))
+}
+
+@Test func atomicallyWritesAUsableRemotePlaylist() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let content = root.appendingPathComponent("content", isDirectory: true)
+    let playlist = root.appendingPathComponent("playlists/current.m3u")
+    let asset = root.appendingPathComponent("release/video.mp4")
+    try FileManager.default.createDirectory(
+        at: asset.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data([0x01]).write(to: asset)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let configurationData = try JSONSerialization.data(withJSONObject: [
+        "contentDirectory": content.path,
+        "playlistPath": playlist.path,
+        "mpvExecutable": "/usr/bin/mpv",
+        "mpvSocketPath": root.appendingPathComponent("mpv.sock").path,
+        "scanIntervalSeconds": 3,
+        "serverURL": "http://192.168.1.25:8080",
+        "playerName": "Koala Wall 01",
+        "installationID": "koala-wall-01",
+        "appVersion": "0.1.6",
+        "heartbeatIntervalSeconds": 30,
+        "manifestPollIntervalSeconds": 30,
+        "stateFilePath": root.appendingPathComponent("state.json").path
+    ])
+    let configuration = try JSONDecoder().decode(Configuration.self, from: configurationData)
+    let manager = PlaylistManager(config: configuration, logger: Logger())
+
+    try manager.write(entries: [asset.path], description: "remote")
+
+    #expect(manager.currentPlaylistIsUsable())
+    #expect(try String(contentsOf: playlist, encoding: .utf8) == asset.path + "\n")
+    try FileManager.default.removeItem(at: asset)
+    #expect(!manager.currentPlaylistIsUsable())
 }
