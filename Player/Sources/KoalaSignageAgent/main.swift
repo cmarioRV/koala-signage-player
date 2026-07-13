@@ -136,6 +136,11 @@ enum AgentError: Error, CustomStringConvertible {
     case unsafeManifestFilename(String)
     case invalidMediaURL(String)
     case downloadedSizeMismatch(filename: String, expected: Int64, actual: Int64)
+    case invalidManifestChecksum(filename: String)
+    case checksumToolUnavailable(String)
+    case checksumToolFailed(Int32)
+    case invalidChecksumOutput
+    case checksumMismatch(filename: String)
 
     var description: String {
         switch self {
@@ -148,6 +153,11 @@ enum AgentError: Error, CustomStringConvertible {
         case .invalidMediaURL(let path): return "Invalid media URL in manifest: \(path)"
         case let .downloadedSizeMismatch(filename, expected, actual):
             return "Downloaded size mismatch for \(filename). Expected \(expected) bytes, received \(actual)."
+        case .invalidManifestChecksum(let filename): return "Invalid SHA-256 in manifest for \(filename)."
+        case .checksumToolUnavailable(let path): return "SHA-256 tool is unavailable at \(path)."
+        case .checksumToolFailed(let status): return "SHA-256 tool failed with status \(status)."
+        case .invalidChecksumOutput: return "SHA-256 tool returned invalid output."
+        case .checksumMismatch(let filename): return "SHA-256 mismatch for \(filename)."
         }
     }
 }
@@ -416,6 +426,54 @@ struct DownloadSummary: Equatable, Sendable {
     var failed = 0
 }
 
+func normalizedSHA256(_ value: String) -> String? {
+    let normalized = value.lowercased()
+    guard normalized.utf8.count == 64,
+          normalized.utf8.allSatisfy({ byte in
+              (48...57).contains(byte) || (97...102).contains(byte)
+          }) else {
+        return nil
+    }
+    return normalized
+}
+
+struct SHA256Hasher: Sendable {
+    func hashFile(at url: URL) throws -> String {
+        #if os(Linux)
+        let executable = "/usr/bin/sha256sum"
+        let arguments = [url.path]
+        #else
+        let executable = "/usr/bin/shasum"
+        let arguments = ["-a", "256", url.path]
+        #endif
+
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            throw AgentError.checksumToolUnavailable(executable)
+        }
+
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw AgentError.checksumToolFailed(process.terminationStatus)
+        }
+
+        guard let line = String(data: data, encoding: .utf8),
+              let firstField = line.split(whereSeparator: { $0.isWhitespace }).first,
+              let checksum = normalizedSHA256(String(firstField)) else {
+            throw AgentError.invalidChecksumOutput
+        }
+        return checksum
+    }
+}
+
 func safeManifestFilename(_ filename: String) -> String? {
     guard !filename.isEmpty,
           filename != ".",
@@ -450,12 +508,20 @@ func fileMatchesExpectedSize(at url: URL, expectedSize: Int64) -> Bool {
 }
 
 actor DownloadManager {
+    private struct VerifiedFileFingerprint: Equatable {
+        let size: Int64
+        let modificationDate: Date?
+        let expectedSHA256: String
+    }
+
     private let baseURL: URL
     private let contentDirectory: URL
     private let stagingDirectory: URL
     private let logger: Logger
     private let session: URLSession
     private let fileManager: FileManager
+    private let hasher: SHA256Hasher
+    private var verifiedFiles: [String: VerifiedFileFingerprint] = [:]
 
     init(
         serverURL: String,
@@ -463,7 +529,8 @@ actor DownloadManager {
         stagingDirectory: String,
         logger: Logger,
         session: URLSession = .shared,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        hasher: SHA256Hasher = SHA256Hasher()
     ) throws {
         guard let baseURL = URL(string: serverURL) else { throw AgentError.invalidServerURL }
         self.baseURL = baseURL
@@ -472,6 +539,7 @@ actor DownloadManager {
         self.logger = logger
         self.session = session
         self.fileManager = fileManager
+        self.hasher = hasher
     }
 
     func stageMissingAssets(from manifest: ManifestResponse) async throws -> DownloadSummary {
@@ -481,22 +549,36 @@ actor DownloadManager {
         for item in manifest.items.sorted(by: { $0.position < $1.position }) {
             do {
                 let filename = try validatedFilename(for: item)
+                let expectedChecksum = try validatedChecksum(for: item)
                 let contentURL = contentDirectory.appendingPathComponent(filename, isDirectory: false)
                 let stagedURL = stagingDirectory.appendingPathComponent(filename, isDirectory: false)
 
-                if fileMatchesExpectedSize(at: contentURL, expectedSize: item.sizeBytes) {
-                    logger.log("Asset already available in content; skipping: \(filename)")
+                if try fileMatchesManifest(
+                    at: contentURL,
+                    expectedSize: item.sizeBytes,
+                    expectedChecksum: expectedChecksum
+                ) {
+                    logger.log("Asset already verified in content; skipping: \(filename)")
                     summary.skipped += 1
                     continue
                 }
 
-                if fileMatchesExpectedSize(at: stagedURL, expectedSize: item.sizeBytes) {
-                    logger.log("Asset already staged; skipping: \(filename)")
+                if try fileMatchesManifest(
+                    at: stagedURL,
+                    expectedSize: item.sizeBytes,
+                    expectedChecksum: expectedChecksum
+                ) {
+                    logger.log("Asset already verified in staging; skipping: \(filename)")
                     summary.skipped += 1
                     continue
                 }
 
-                try await download(item: item, filename: filename, destination: stagedURL)
+                try await download(
+                    item: item,
+                    filename: filename,
+                    expectedChecksum: expectedChecksum,
+                    destination: stagedURL
+                )
                 summary.downloaded += 1
             } catch {
                 summary.failed += 1
@@ -514,7 +596,19 @@ actor DownloadManager {
         return filename
     }
 
-    private func download(item: ManifestItem, filename: String, destination: URL) async throws {
+    private func validatedChecksum(for item: ManifestItem) throws -> String {
+        guard let checksum = normalizedSHA256(item.sha256) else {
+            throw AgentError.invalidManifestChecksum(filename: item.filename)
+        }
+        return checksum
+    }
+
+    private func download(
+        item: ManifestItem,
+        filename: String,
+        expectedChecksum: String,
+        destination: URL
+    ) async throws {
         guard let sourceURL = resolveManifestMediaURL(baseURL: baseURL, relativeURL: item.relativeURL) else {
             throw AgentError.invalidMediaURL(item.relativeURL)
         }
@@ -540,11 +634,77 @@ actor DownloadManager {
         defer { try? fileManager.removeItem(at: partialURL) }
 
         try fileManager.copyItem(at: temporaryURL, to: partialURL)
+        guard try hasher.hashFile(at: partialURL) == expectedChecksum else {
+            throw AgentError.checksumMismatch(filename: filename)
+        }
+        logger.log("SHA-256 validated for downloaded asset: \(filename)")
+
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
         try fileManager.moveItem(at: partialURL, to: destination)
+        cacheVerifiedFile(at: destination, expectedChecksum: expectedChecksum)
         logger.log("Asset downloaded to staging: \(filename) (\(actualSize) bytes).")
+    }
+
+    private func fileMatchesManifest(
+        at url: URL,
+        expectedSize: Int64,
+        expectedChecksum: String
+    ) throws -> Bool {
+        guard let fingerprint = fingerprint(
+            at: url,
+            expectedSize: expectedSize,
+            expectedChecksum: expectedChecksum
+        ) else {
+            verifiedFiles.removeValue(forKey: url.path)
+            return false
+        }
+
+        if verifiedFiles[url.path] == fingerprint {
+            return true
+        }
+
+        guard try hasher.hashFile(at: url) == expectedChecksum else {
+            verifiedFiles.removeValue(forKey: url.path)
+            return false
+        }
+
+        verifiedFiles[url.path] = fingerprint
+        logger.log("SHA-256 validated for existing asset: \(url.lastPathComponent)")
+        return true
+    }
+
+    private func fingerprint(
+        at url: URL,
+        expectedSize: Int64,
+        expectedChecksum: String
+    ) -> VerifiedFileFingerprint? {
+        guard expectedSize >= 0,
+              let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let fileType = attributes[.type] as? FileAttributeType,
+              fileType == .typeRegular,
+              let size = attributes[.size] as? NSNumber,
+              size.int64Value == expectedSize else {
+            return nil
+        }
+        return VerifiedFileFingerprint(
+            size: size.int64Value,
+            modificationDate: attributes[.modificationDate] as? Date,
+            expectedSHA256: expectedChecksum
+        )
+    }
+
+    private func cacheVerifiedFile(at url: URL, expectedChecksum: String) {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber else {
+            return
+        }
+        verifiedFiles[url.path] = VerifiedFileFingerprint(
+            size: size.int64Value,
+            modificationDate: attributes[.modificationDate] as? Date,
+            expectedSHA256: expectedChecksum
+        )
     }
 
     private func fileSize(at url: URL) throws -> Int64 {

@@ -39,6 +39,7 @@ Koala Signage
 * ✅ Device registration and heartbeat reporting
 * ✅ Remote manifest polling and version detection
 * ✅ Missing asset downloads into isolated staging storage
+* ✅ SHA-256 integrity verification
 * ✅ Lightweight architecture
 
 ## Planned
@@ -158,7 +159,7 @@ When a newer manifest is available, missing assets are downloaded to an isolated
 "stagingDirectory": "/var/lib/koala-signage/staging"
 ```
 
-Downloads use a temporary `.part` file and must match the manifest's expected byte size before becoming staged. Staged files are not moved into `content`, added to `current.m3u`, or loaded into MPV. Cryptographic checksum validation and playlist activation remain separate future increments.
+Downloads use a temporary `.part` file and must match both the expected byte size and SHA-256 checksum before becoming staged. Existing files are also checked before being skipped. Staged files are not moved into `content`, added to `current.m3u`, or loaded into MPV. Playlist activation remains a separate future increment.
 
 ---
 
@@ -201,13 +202,12 @@ KoalaSignagePlayer
 * [x] Heartbeat
 * [x] Manifest polling and decoding
 * [x] Download missing assets to staging
-* [ ] SHA-256 verification
+* [x] SHA-256 verification
 * [ ] Atomic playlist activation
 
 ## Phase 3 — Content Management
 
 * [ ] Local cache
-* [ ] Integrity verification
 * [ ] Versioned playlists
 * [ ] Automatic cleanup
 

@@ -20,6 +20,8 @@ All notable changes to this project will be documented in this file.
 - Missing asset downloads into an isolated staging directory
 - Partial-file handling and expected-size checks for remote downloads
 - Manifest filename and relative URL safety validation
+- SHA-256 validation for downloaded and existing assets
+- In-memory verification cache to avoid hashing unchanged files on every poll
 
 ### Changed
 

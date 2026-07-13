@@ -151,7 +151,7 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
         name: "Video principal Koala",
         filename: "video.mp4",
         relativeURL: "/media/video.mp4",
-        sha256: "unused-in-this-increment",
+        sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
         sizeBytes: 3,
         durationSeconds: 1,
         position: 0
@@ -171,4 +171,62 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     #expect(try Data(contentsOf: staging.appendingPathComponent("video.mp4")) == Data([0x01, 0x02, 0x03]))
     #expect(!FileManager.default.fileExists(atPath: content.appendingPathComponent("video.mp4").path))
     #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("video.mp4.part").path))
+}
+
+@Test func calculatesSHA256ForAFileWithoutLoadingItIntoThePlayer() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let file = directory.appendingPathComponent("asset.mp4")
+    try Data([0x01, 0x02, 0x03]).write(to: file)
+
+    #expect(
+        try SHA256Hasher().hashFile(at: file)
+            == "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
+    )
+    #expect(normalizedSHA256(String(repeating: "A", count: 64)) == String(repeating: "a", count: 64))
+    #expect(normalizedSHA256("not-a-checksum") == nil)
+}
+
+@Test func rejectsChecksumMismatchWithoutFinalizingStagedFile() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let content = root.appendingPathComponent("content", isDirectory: true)
+    let staging = root.appendingPathComponent("staging", isDirectory: true)
+    try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
+    let manager = try DownloadManager(
+        serverURL: "http://192.168.1.25:8080",
+        contentDirectory: content.path,
+        stagingDirectory: staging.path,
+        logger: Logger(),
+        session: URLSession(configuration: sessionConfiguration)
+    )
+    let item = ManifestItem(
+        id: UUID(),
+        name: "Corrupted video",
+        filename: "corrupted.mp4",
+        relativeURL: "/media/corrupted.mp4",
+        sha256: String(repeating: "0", count: 64),
+        sizeBytes: 3,
+        durationSeconds: 1,
+        position: 0
+    )
+    let manifest = ManifestResponse(
+        playlistID: UUID(),
+        version: 3,
+        generatedAt: Date(),
+        items: [item]
+    )
+
+    let summary = try await manager.stageMissingAssets(from: manifest)
+
+    #expect(summary == DownloadSummary(downloaded: 0, skipped: 0, failed: 1))
+    #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("corrupted.mp4").path))
+    #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("corrupted.mp4.part").path))
 }
