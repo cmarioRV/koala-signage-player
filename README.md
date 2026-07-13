@@ -38,13 +38,14 @@ Koala Signage
 * ✅ Automatic MPV recovery
 * ✅ Device registration and heartbeat reporting
 * ✅ Remote manifest polling and version detection
+* ✅ Missing asset downloads into isolated staging storage
 * ✅ Lightweight architecture
 
 ## Planned
 
 * ⏳ Remote content synchronization
 * ⏳ Manifest-based content installation
-* ⏳ Download manager
+* ⏳ Download retry and resume support
 * ⏳ Local content cache
 * ⏳ Playlist scheduling
 * ⏳ Health monitoring
@@ -151,7 +152,13 @@ The player polls its assigned remote manifest without changing local playback. C
 "manifestPollIntervalSeconds": 30
 ```
 
-At this stage, a newer manifest is decoded and reported in the logs only. Downloads, checksum validation, and remote playlist activation are intentionally not implemented yet.
+When a newer manifest is available, missing assets are downloaded to an isolated staging directory:
+
+```json
+"stagingDirectory": "/var/lib/koala-signage/staging"
+```
+
+Downloads use a temporary `.part` file and must match the manifest's expected byte size before becoming staged. Staged files are not moved into `content`, added to `current.m3u`, or loaded into MPV. Cryptographic checksum validation and playlist activation remain separate future increments.
 
 ---
 
@@ -193,7 +200,9 @@ KoalaSignagePlayer
 * [x] Device registration
 * [x] Heartbeat
 * [x] Manifest polling and decoding
-* [ ] Download manager
+* [x] Download missing assets to staging
+* [ ] SHA-256 verification
+* [ ] Atomic playlist activation
 
 ## Phase 3 — Content Management
 

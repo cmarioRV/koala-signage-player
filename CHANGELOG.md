@@ -17,8 +17,12 @@ All notable changes to this project will be documented in this file.
 - Remote manifest polling and decoding
 - Installed-versus-remote playlist version comparison
 - Manifest contract tests
+- Missing asset downloads into an isolated staging directory
+- Partial-file handling and expected-size checks for remote downloads
+- Manifest filename and relative URL safety validation
 
 ### Changed
 
 - Heartbeats now report the locally installed playlist version when available
 - Added a macOS-compatible Unix socket type while preserving Linux behavior
+- Existing configurations default staging storage to a sibling of the content directory

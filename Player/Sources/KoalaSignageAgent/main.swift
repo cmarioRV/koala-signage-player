@@ -20,6 +20,7 @@ struct Configuration: Decodable, Sendable {
     let appVersion: String
     let heartbeatIntervalSeconds: UInt64
     let manifestPollIntervalSeconds: UInt64
+    let stagingDirectory: String
     let stateFilePath: String
 
     private enum CodingKeys: String, CodingKey {
@@ -34,6 +35,7 @@ struct Configuration: Decodable, Sendable {
         case appVersion
         case heartbeatIntervalSeconds
         case manifestPollIntervalSeconds
+        case stagingDirectory
         case stateFilePath
     }
 
@@ -53,6 +55,11 @@ struct Configuration: Decodable, Sendable {
             UInt64.self,
             forKey: .manifestPollIntervalSeconds
         ) ?? 30
+        stagingDirectory = try container.decodeIfPresent(String.self, forKey: .stagingDirectory)
+            ?? URL(fileURLWithPath: contentDirectory)
+                .deletingLastPathComponent()
+                .appendingPathComponent("staging", isDirectory: true)
+                .path
         stateFilePath = try container.decode(String.self, forKey: .stateFilePath)
     }
 }
@@ -126,6 +133,9 @@ enum AgentError: Error, CustomStringConvertible {
     case invalidResponse
     case unexpectedStatus(Int)
     case socketConnectionFailed(Int32)
+    case unsafeManifestFilename(String)
+    case invalidMediaURL(String)
+    case downloadedSizeMismatch(filename: String, expected: Int64, actual: Int64)
 
     var description: String {
         switch self {
@@ -134,6 +144,10 @@ enum AgentError: Error, CustomStringConvertible {
         case .invalidResponse: return "The server returned an invalid response."
         case .unexpectedStatus(let status): return "Unexpected HTTP status: \(status)"
         case .socketConnectionFailed(let code): return "Could not connect to mpv IPC socket. errno=\(code)"
+        case .unsafeManifestFilename(let filename): return "Unsafe manifest filename: \(filename)"
+        case .invalidMediaURL(let path): return "Invalid media URL in manifest: \(path)"
+        case let .downloadedSizeMismatch(filename, expected, actual):
+            return "Downloaded size mismatch for \(filename). Expected \(expected) bytes, received \(actual)."
         }
     }
 }
@@ -396,6 +410,152 @@ func freeStorageBytes(at path: String) -> Int64? {
     return value.int64Value
 }
 
+struct DownloadSummary: Equatable, Sendable {
+    var downloaded = 0
+    var skipped = 0
+    var failed = 0
+}
+
+func safeManifestFilename(_ filename: String) -> String? {
+    guard !filename.isEmpty,
+          filename != ".",
+          filename != "..",
+          !filename.contains("/"),
+          !filename.contains("\\"),
+          URL(fileURLWithPath: filename).lastPathComponent == filename else {
+        return nil
+    }
+    return filename
+}
+
+func resolveManifestMediaURL(baseURL: URL, relativeURL: String) -> URL? {
+    guard relativeURL.hasPrefix("/"),
+          let components = URLComponents(string: relativeURL),
+          components.scheme == nil,
+          components.host == nil else {
+        return nil
+    }
+    return URL(string: relativeURL, relativeTo: baseURL)?.absoluteURL
+}
+
+func fileMatchesExpectedSize(at url: URL, expectedSize: Int64) -> Bool {
+    guard expectedSize >= 0,
+          let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+          let fileType = attributes[.type] as? FileAttributeType,
+          fileType == .typeRegular,
+          let size = attributes[.size] as? NSNumber else {
+        return false
+    }
+    return size.int64Value == expectedSize
+}
+
+actor DownloadManager {
+    private let baseURL: URL
+    private let contentDirectory: URL
+    private let stagingDirectory: URL
+    private let logger: Logger
+    private let session: URLSession
+    private let fileManager: FileManager
+
+    init(
+        serverURL: String,
+        contentDirectory: String,
+        stagingDirectory: String,
+        logger: Logger,
+        session: URLSession = .shared,
+        fileManager: FileManager = .default
+    ) throws {
+        guard let baseURL = URL(string: serverURL) else { throw AgentError.invalidServerURL }
+        self.baseURL = baseURL
+        self.contentDirectory = URL(fileURLWithPath: contentDirectory, isDirectory: true)
+        self.stagingDirectory = URL(fileURLWithPath: stagingDirectory, isDirectory: true)
+        self.logger = logger
+        self.session = session
+        self.fileManager = fileManager
+    }
+
+    func stageMissingAssets(from manifest: ManifestResponse) async throws -> DownloadSummary {
+        try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        var summary = DownloadSummary()
+
+        for item in manifest.items.sorted(by: { $0.position < $1.position }) {
+            do {
+                let filename = try validatedFilename(for: item)
+                let contentURL = contentDirectory.appendingPathComponent(filename, isDirectory: false)
+                let stagedURL = stagingDirectory.appendingPathComponent(filename, isDirectory: false)
+
+                if fileMatchesExpectedSize(at: contentURL, expectedSize: item.sizeBytes) {
+                    logger.log("Asset already available in content; skipping: \(filename)")
+                    summary.skipped += 1
+                    continue
+                }
+
+                if fileMatchesExpectedSize(at: stagedURL, expectedSize: item.sizeBytes) {
+                    logger.log("Asset already staged; skipping: \(filename)")
+                    summary.skipped += 1
+                    continue
+                }
+
+                try await download(item: item, filename: filename, destination: stagedURL)
+                summary.downloaded += 1
+            } catch {
+                summary.failed += 1
+                logger.log("Asset download failed for \(item.filename). Error: \(error)")
+            }
+        }
+
+        return summary
+    }
+
+    private func validatedFilename(for item: ManifestItem) throws -> String {
+        guard let filename = safeManifestFilename(item.filename) else {
+            throw AgentError.unsafeManifestFilename(item.filename)
+        }
+        return filename
+    }
+
+    private func download(item: ManifestItem, filename: String, destination: URL) async throws {
+        guard let sourceURL = resolveManifestMediaURL(baseURL: baseURL, relativeURL: item.relativeURL) else {
+            throw AgentError.invalidMediaURL(item.relativeURL)
+        }
+
+        logger.log("Downloading asset to staging: \(filename)")
+        let (temporaryURL, response) = try await session.download(from: sourceURL)
+        guard let http = response as? HTTPURLResponse else { throw AgentError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw AgentError.unexpectedStatus(http.statusCode)
+        }
+
+        let actualSize = try fileSize(at: temporaryURL)
+        guard actualSize == item.sizeBytes else {
+            throw AgentError.downloadedSizeMismatch(
+                filename: filename,
+                expected: item.sizeBytes,
+                actual: actualSize
+            )
+        }
+
+        let partialURL = destination.appendingPathExtension("part")
+        try? fileManager.removeItem(at: partialURL)
+        defer { try? fileManager.removeItem(at: partialURL) }
+
+        try fileManager.copyItem(at: temporaryURL, to: partialURL)
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        try fileManager.moveItem(at: partialURL, to: destination)
+        logger.log("Asset downloaded to staging: \(filename) (\(actualSize) bytes).")
+    }
+
+    private func fileSize(at url: URL) throws -> Int64 {
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        guard let size = attributes[.size] as? NSNumber else {
+            throw AgentError.invalidResponse
+        }
+        return size.int64Value
+    }
+}
+
 @main
 enum KoalaSignagePlayer {
     static func main() async {
@@ -414,6 +574,12 @@ enum KoalaSignagePlayer {
             let mpvManager = MPVManager(config: config, logger: logger)
             let stateStore = StateStore(path: config.stateFilePath)
             let serverClient = try ServerClient(serverURL: config.serverURL)
+            let downloadManager = try DownloadManager(
+                serverURL: config.serverURL,
+                contentDirectory: config.contentDirectory,
+                stagingDirectory: config.stagingDirectory,
+                logger: logger
+            )
 
             var snapshot = try playlistManager.snapshot()
             try playlistManager.write(snapshot)
@@ -470,7 +636,17 @@ enum KoalaSignagePlayer {
 
                             switch compareManifestVersion(installed: installedVersion, remote: manifest.version) {
                             case .updateAvailable:
-                                logger.log("Remote playlist update available; no content changes applied.")
+                                logger.log("Remote playlist update available; staging missing assets.")
+                                do {
+                                    let summary = try await downloadManager.stageMissingAssets(from: manifest)
+                                    logger.log(
+                                        "Staging sync completed. Downloaded: \(summary.downloaded); "
+                                        + "skipped: \(summary.skipped); failed: \(summary.failed). "
+                                        + "Local playback was not changed."
+                                    )
+                                } catch {
+                                    logger.log("Staging sync failed; local playback is unaffected. Error: \(error)")
+                                }
                             case .upToDate:
                                 logger.log("Remote manifest matches the installed playlist version.")
                             case .localVersionAhead:

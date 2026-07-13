@@ -1,6 +1,29 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 @testable import KoalaSignagePlayer
+
+private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Length": "3"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data([0x01, 0x02, 0x03]))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
 
 @Test func decodesConfirmedServerManifestContract() throws {
     let json = #"""
@@ -70,4 +93,82 @@ import Testing
     let configuration = try JSONDecoder().decode(Configuration.self, from: Data(json.utf8))
 
     #expect(configuration.manifestPollIntervalSeconds == 30)
+    #expect(configuration.stagingDirectory == "/var/lib/koala-signage/staging")
+}
+
+@Test func validatesManifestFilenamesBeforeBuildingLocalPaths() {
+    #expect(safeManifestFilename("video_16_3_formatted.mp4") == "video_16_3_formatted.mp4")
+    #expect(safeManifestFilename("../config.json") == nil)
+    #expect(safeManifestFilename("nested/video.mp4") == nil)
+    #expect(safeManifestFilename("nested\\video.mp4") == nil)
+}
+
+@Test func resolvesOnlyRelativeServerMediaURLs() throws {
+    let baseURL = try #require(URL(string: "http://192.168.1.25:8080"))
+
+    #expect(
+        resolveManifestMediaURL(baseURL: baseURL, relativeURL: "/media/video.mp4")
+            == URL(string: "http://192.168.1.25:8080/media/video.mp4")
+    )
+    #expect(resolveManifestMediaURL(baseURL: baseURL, relativeURL: "https://example.com/video.mp4") == nil)
+    #expect(resolveManifestMediaURL(baseURL: baseURL, relativeURL: "media/video.mp4") == nil)
+}
+
+@Test func recognizesOnlyRegularFilesWithTheExpectedSize() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let file = directory.appendingPathComponent("asset.mp4")
+    try Data([0x01, 0x02, 0x03]).write(to: file)
+
+    #expect(fileMatchesExpectedSize(at: file, expectedSize: 3))
+    #expect(!fileMatchesExpectedSize(at: file, expectedSize: 2))
+    #expect(!fileMatchesExpectedSize(at: directory, expectedSize: 3))
+}
+
+@Test func downloadsMissingAssetToStagingWithoutChangingContent() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let content = root.appendingPathComponent("content", isDirectory: true)
+    let staging = root.appendingPathComponent("staging", isDirectory: true)
+    try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
+    let session = URLSession(configuration: sessionConfiguration)
+    let manager = try DownloadManager(
+        serverURL: "http://192.168.1.25:8080",
+        contentDirectory: content.path,
+        stagingDirectory: staging.path,
+        logger: Logger(),
+        session: session
+    )
+    let item = ManifestItem(
+        id: UUID(),
+        name: "Video principal Koala",
+        filename: "video.mp4",
+        relativeURL: "/media/video.mp4",
+        sha256: "unused-in-this-increment",
+        sizeBytes: 3,
+        durationSeconds: 1,
+        position: 0
+    )
+    let manifest = ManifestResponse(
+        playlistID: UUID(),
+        version: 2,
+        generatedAt: Date(),
+        items: [item]
+    )
+
+    let firstSummary = try await manager.stageMissingAssets(from: manifest)
+    let secondSummary = try await manager.stageMissingAssets(from: manifest)
+
+    #expect(firstSummary == DownloadSummary(downloaded: 1, skipped: 0, failed: 0))
+    #expect(secondSummary == DownloadSummary(downloaded: 0, skipped: 1, failed: 0))
+    #expect(try Data(contentsOf: staging.appendingPathComponent("video.mp4")) == Data([0x01, 0x02, 0x03]))
+    #expect(!FileManager.default.fileExists(atPath: content.appendingPathComponent("video.mp4").path))
+    #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("video.mp4.part").path))
 }
