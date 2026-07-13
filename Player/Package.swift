@@ -8,6 +8,10 @@ let package = Package(
         .executable(name: "koala-signage-player", targets: ["KoalaSignagePlayer"])
     ],
     targets: [
-        .executableTarget(name: "KoalaSignagePlayer")
+        .executableTarget(name: "KoalaSignagePlayer"),
+        .testTarget(
+            name: "KoalaSignagePlayerTests",
+            dependencies: ["KoalaSignagePlayer"]
+        )
     ]
 )

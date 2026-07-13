@@ -36,12 +36,14 @@ Koala Signage
 * ✅ Local-first playback
 * ✅ systemd integration
 * ✅ Automatic MPV recovery
+* ✅ Device registration and heartbeat reporting
+* ✅ Remote manifest polling and version detection
 * ✅ Lightweight architecture
 
 ## Planned
 
 * ⏳ Remote content synchronization
-* ⏳ Manifest-based updates
+* ⏳ Manifest-based content installation
 * ⏳ Download manager
 * ⏳ Local content cache
 * ⏳ Playlist scheduling
@@ -139,9 +141,17 @@ swift build -c release
 # Running
 
 ```bash
-.build/release/KoalaSignagePlayer \
+.build/release/koala-signage-player \
     --config Resources/config.example.json
 ```
+
+The player polls its assigned remote manifest without changing local playback. Configure the interval with:
+
+```json
+"manifestPollIntervalSeconds": 30
+```
+
+At this stage, a newer manifest is decoded and reported in the logs only. Downloads, checksum validation, and remote playlist activation are intentionally not implemented yet.
 
 ---
 
@@ -180,9 +190,9 @@ KoalaSignagePlayer
 
 ## Phase 2 — Remote Communication
 
-* [ ] Device registration
-* [ ] Heartbeat
-* [ ] Manifest API
+* [x] Device registration
+* [x] Heartbeat
+* [x] Manifest polling and decoding
 * [ ] Download manager
 
 ## Phase 3 — Content Management

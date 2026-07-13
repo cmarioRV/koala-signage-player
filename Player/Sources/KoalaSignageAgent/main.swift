@@ -19,7 +19,42 @@ struct Configuration: Decodable, Sendable {
     let installationID: String
     let appVersion: String
     let heartbeatIntervalSeconds: UInt64
+    let manifestPollIntervalSeconds: UInt64
     let stateFilePath: String
+
+    private enum CodingKeys: String, CodingKey {
+        case contentDirectory
+        case playlistPath
+        case mpvExecutable
+        case mpvSocketPath
+        case scanIntervalSeconds
+        case serverURL
+        case playerName
+        case installationID
+        case appVersion
+        case heartbeatIntervalSeconds
+        case manifestPollIntervalSeconds
+        case stateFilePath
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        contentDirectory = try container.decode(String.self, forKey: .contentDirectory)
+        playlistPath = try container.decode(String.self, forKey: .playlistPath)
+        mpvExecutable = try container.decode(String.self, forKey: .mpvExecutable)
+        mpvSocketPath = try container.decode(String.self, forKey: .mpvSocketPath)
+        scanIntervalSeconds = try container.decode(UInt64.self, forKey: .scanIntervalSeconds)
+        serverURL = try container.decode(String.self, forKey: .serverURL)
+        playerName = try container.decode(String.self, forKey: .playerName)
+        installationID = try container.decode(String.self, forKey: .installationID)
+        appVersion = try container.decode(String.self, forKey: .appVersion)
+        heartbeatIntervalSeconds = try container.decode(UInt64.self, forKey: .heartbeatIntervalSeconds)
+        manifestPollIntervalSeconds = try container.decodeIfPresent(
+            UInt64.self,
+            forKey: .manifestPollIntervalSeconds
+        ) ?? 30
+        stateFilePath = try container.decode(String.self, forKey: .stateFilePath)
+    }
 }
 
 struct RegisterPlayerRequest: Encodable {
@@ -46,6 +81,43 @@ struct HeartbeatRequest: Encodable {
 
 struct PersistedState: Codable {
     var playerID: UUID?
+    var installedPlaylistVersion: Int?
+
+    init(playerID: UUID?, installedPlaylistVersion: Int? = nil) {
+        self.playerID = playerID
+        self.installedPlaylistVersion = installedPlaylistVersion
+    }
+}
+
+struct ManifestResponse: Decodable, Equatable, Sendable {
+    let playlistID: UUID
+    let version: Int
+    let generatedAt: Date
+    let items: [ManifestItem]
+}
+
+struct ManifestItem: Decodable, Equatable, Sendable {
+    let id: UUID
+    let name: String
+    let filename: String
+    let relativeURL: String
+    let sha256: String
+    let sizeBytes: Int64
+    let durationSeconds: Double?
+    let position: Int
+}
+
+enum ManifestVersionComparison: Equatable {
+    case updateAvailable
+    case upToDate
+    case localVersionAhead
+}
+
+func compareManifestVersion(installed: Int?, remote: Int) -> ManifestVersionComparison {
+    guard let installed else { return .updateAvailable }
+    if remote > installed { return .updateAvailable }
+    if remote == installed { return .upToDate }
+    return .localVersionAhead
 }
 
 enum AgentError: Error, CustomStringConvertible {
@@ -145,6 +217,19 @@ actor ServerClient {
         guard let http = response as? HTTPURLResponse else { throw AgentError.invalidResponse }
         guard http.statusCode == 204 else { throw AgentError.unexpectedStatus(http.statusCode) }
     }
+
+    func fetchManifest(playerID: UUID) async throws -> ManifestResponse {
+        let url = baseURL.appending(path: "api/v1/players/\(playerID.uuidString)/manifest")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AgentError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw AgentError.unexpectedStatus(http.statusCode)
+        }
+        return try decoder.decode(ManifestResponse.self, from: data)
+    }
 }
 
 struct PlaylistSnapshot: Equatable {
@@ -207,7 +292,12 @@ final class MPVClient: @unchecked Sendable {
     }
 
     func send(command: [String]) throws {
-        let descriptor = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        #if os(Linux)
+        let socketType = Int32(SOCK_STREAM.rawValue)
+        #else
+        let socketType = SOCK_STREAM
+        #endif
+        let descriptor = socket(AF_UNIX, socketType, 0)
         guard descriptor >= 0 else { throw AgentError.socketConnectionFailed(errno) }
         defer { close(descriptor) }
 
@@ -353,7 +443,7 @@ enum KoalaSignagePlayer {
                                 payload: HeartbeatRequest(
                                     appVersion: config.appVersion,
                                     currentAssetID: nil,
-                                    installedPlaylistVersion: nil,
+                                    installedPlaylistVersion: stateStore.load().installedPlaylistVersion,
                                     freeStorageBytes: freeStorageBytes(at: config.contentDirectory)
                                 )
                             )
@@ -363,6 +453,34 @@ enum KoalaSignagePlayer {
                         }
                     }
                     try? await Task.sleep(for: .seconds(config.heartbeatIntervalSeconds))
+                }
+            }
+
+            let manifestTask = Task {
+                while !Task.isCancelled {
+                    if let playerID = stateStore.load().playerID {
+                        do {
+                            let manifest = try await serverClient.fetchManifest(playerID: playerID)
+                            let installedVersion = stateStore.load().installedPlaylistVersion
+                            let installedDescription = installedVersion.map(String.init) ?? "none"
+                            logger.log(
+                                "Manifest received. Remote version: \(manifest.version); "
+                                + "installed version: \(installedDescription); items: \(manifest.items.count)."
+                            )
+
+                            switch compareManifestVersion(installed: installedVersion, remote: manifest.version) {
+                            case .updateAvailable:
+                                logger.log("Remote playlist update available; no content changes applied.")
+                            case .upToDate:
+                                logger.log("Remote manifest matches the installed playlist version.")
+                            case .localVersionAhead:
+                                logger.log("Installed playlist version is ahead of the remote manifest.")
+                            }
+                        } catch {
+                            logger.log("Manifest polling failed; local playback is unaffected. Error: \(error)")
+                        }
+                    }
+                    try? await Task.sleep(for: .seconds(config.manifestPollIntervalSeconds))
                 }
             }
 
@@ -383,6 +501,7 @@ enum KoalaSignagePlayer {
             }
 
             heartbeatTask.cancel()
+            manifestTask.cancel()
         } catch {
             logger.log("Fatal error: \(error)")
             exit(EXIT_FAILURE)

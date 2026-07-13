@@ -7,7 +7,8 @@
   "serverURL": "http://192.168.1.25:8080",
   "playerName": "Koala Wall 01",
   "installationID": "koala-wall-01",
-  "appVersion": "0.1.2",
+  "appVersion": "0.1.3",
   "heartbeatIntervalSeconds": 30,
+  "manifestPollIntervalSeconds": 30,
   "stateFilePath": "/var/lib/koala-signage/state/player-state.json"
 }
