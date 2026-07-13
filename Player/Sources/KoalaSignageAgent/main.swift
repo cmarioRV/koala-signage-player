@@ -190,9 +190,16 @@ enum AgentError: Error, CustomStringConvertible {
 }
 
 struct Logger {
+    private static let outputLock = NSLock()
+
     func log(_ message: String) {
         let formatter = ISO8601DateFormatter()
-        print("[\(formatter.string(from: Date()))] \(message)")
+        let line = "[\(formatter.string(from: Date()))] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+
+        Self.outputLock.lock()
+        defer { Self.outputLock.unlock() }
+        FileHandle.standardOutput.write(data)
     }
 }
 

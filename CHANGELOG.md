@@ -35,3 +35,4 @@ All notable changes to this project will be documented in this file.
 - Existing configurations default staging storage to a sibling of the content directory
 - Raspberry installer now deploys the current player binary and preserves existing configuration
 - systemd deployment now creates all runtime directories and starts the updated service
+- Player logs now write directly to standard output for immediate systemd journal visibility

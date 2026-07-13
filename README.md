@@ -157,6 +157,12 @@ cd Player
 
 The installer builds the release binary, creates the required content, staging, playlist, and state directories, installs the existing `koala-signage-agent.service`, and restarts it. An existing `/etc/koala-signage/config.json` is preserved during upgrades.
 
+Player logs are written directly to the systemd journal and can be followed without buffering:
+
+```bash
+sudo journalctl -u koala-signage-agent -f
+```
+
 The player polls its assigned remote manifest without changing local playback. Configure the interval with:
 
 ```json
