@@ -1,5 +1,5 @@
 [Unit]
-Description=Koala Signage Agent
+Description=Koala Signage Player
 After=graphical.target network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ Group=mario
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 WorkingDirectory=/opt/koala-signage
-ExecStart=/opt/koala-signage/koala-signage-agent --config /etc/koala-signage/config.json
+ExecStart=/opt/koala-signage/koala-signage-player --config /etc/koala-signage/config.json
 Restart=always
 RestartSec=5
 

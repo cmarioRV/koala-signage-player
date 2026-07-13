@@ -148,6 +148,15 @@ swift build -c release
     --config Resources/config.example.json
 ```
 
+## Raspberry Pi installation or upgrade
+
+```bash
+cd Player
+./Scripts/install.sh
+```
+
+The installer builds the release binary, creates the required content, staging, playlist, and state directories, installs the existing `koala-signage-agent.service`, and restarts it. An existing `/etc/koala-signage/config.json` is preserved during upgrades.
+
 The player polls its assigned remote manifest without changing local playback. Configure the interval with:
 
 ```json

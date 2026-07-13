@@ -33,3 +33,5 @@ All notable changes to this project will be documented in this file.
 - Heartbeats now report the locally installed playlist version when available
 - Added a macOS-compatible Unix socket type while preserving Linux behavior
 - Existing configurations default staging storage to a sibling of the content directory
+- Raspberry installer now deploys the current player binary and preserves existing configuration
+- systemd deployment now creates all runtime directories and starts the updated service
