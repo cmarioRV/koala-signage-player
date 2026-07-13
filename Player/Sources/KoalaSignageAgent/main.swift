@@ -164,6 +164,7 @@ enum AgentError: Error, CustomStringConvertible {
     case duplicateManifestPosition(Int)
     case conflictingManifestFilename(String)
     case assetNotReady(String)
+    case invalidActiveReleasePath(String)
 
     var description: String {
         switch self {
@@ -185,6 +186,7 @@ enum AgentError: Error, CustomStringConvertible {
         case .duplicateManifestPosition(let position): return "Duplicate manifest position: \(position)."
         case .conflictingManifestFilename(let filename): return "Conflicting manifest filename: \(filename)."
         case .assetNotReady(let filename): return "No verified local source is available for \(filename)."
+        case .invalidActiveReleasePath(let path): return "Active release is outside managed storage: \(path)."
         }
     }
 }
@@ -498,6 +500,12 @@ struct PreparedRelease: Equatable, Sendable {
     let entries: [String]
 }
 
+struct CleanupSummary: Equatable, Sendable {
+    let stagingEntriesRemoved: Int
+    let releasesRemoved: Int
+    let previousReleaseKept: String?
+}
+
 func normalizedSHA256(_ value: String) -> String? {
     let normalized = value.lowercased()
     guard normalized.utf8.count == 64,
@@ -754,6 +762,101 @@ actor DownloadManager {
         try fileManager.moveItem(at: temporaryRelease, to: finalRelease)
         logger.log("Versioned release prepared: \(finalRelease.lastPathComponent)")
         return preparedRelease(manifest: manifest, directory: finalRelease, items: sortedItems)
+    }
+
+    func cleanupAfterActivation(activeRelease: PreparedRelease) throws -> CleanupSummary {
+        let releasesRoot = contentDirectory
+            .appendingPathComponent(".remote", isDirectory: true)
+            .standardizedFileURL
+        let activeDirectory = URL(
+            fileURLWithPath: activeRelease.directory,
+            isDirectory: true
+        ).standardizedFileURL
+        guard activeDirectory.deletingLastPathComponent() == releasesRoot else {
+            throw AgentError.invalidActiveReleasePath(activeDirectory.path)
+        }
+
+        var stagingEntriesRemoved = 0
+        if fileManager.fileExists(atPath: stagingDirectory.path) {
+            let stagedEntries = try fileManager.contentsOfDirectory(
+                at: stagingDirectory,
+                includingPropertiesForKeys: nil
+            )
+            for entry in stagedEntries {
+                try fileManager.removeItem(at: entry)
+                removeCachedFingerprints(under: entry)
+                stagingEntriesRemoved += 1
+            }
+        }
+
+        let releaseEntries = try fileManager.contentsOfDirectory(
+            at: releasesRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]
+        )
+        var usablePreviousReleases: [(url: URL, modifiedAt: Date)] = []
+        var releasesRemoved = 0
+
+        for entry in releaseEntries {
+            let standardizedEntry = entry.standardizedFileURL
+            if standardizedEntry == activeDirectory { continue }
+
+            let values = try entry.resourceValues(
+                forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]
+            )
+            let isPending = entry.lastPathComponent.hasPrefix(".pending-")
+            let isUsableDirectory = values.isDirectory == true
+                && values.isSymbolicLink != true
+                && releaseDirectoryContainsMedia(entry)
+
+            if isPending || !isUsableDirectory {
+                try fileManager.removeItem(at: entry)
+                removeCachedFingerprints(under: entry)
+                releasesRemoved += 1
+                continue
+            }
+
+            usablePreviousReleases.append((
+                url: entry,
+                modifiedAt: values.contentModificationDate ?? .distantPast
+            ))
+        }
+
+        usablePreviousReleases.sort { $0.modifiedAt > $1.modifiedAt }
+        let previousRelease = usablePreviousReleases.first?.url
+        for obsoleteRelease in usablePreviousReleases.dropFirst() {
+            try fileManager.removeItem(at: obsoleteRelease.url)
+            removeCachedFingerprints(under: obsoleteRelease.url)
+            releasesRemoved += 1
+        }
+
+        return CleanupSummary(
+            stagingEntriesRemoved: stagingEntriesRemoved,
+            releasesRemoved: releasesRemoved,
+            previousReleaseKept: previousRelease?.path
+        )
+    }
+
+    private func releaseDirectoryContainsMedia(_ directory: URL) -> Bool {
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else {
+            return false
+        }
+        return entries.contains { entry in
+            (try? entry.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+    }
+
+    private func removeCachedFingerprints(under url: URL) {
+        let path = url.standardizedFileURL.path
+        let childPrefix = path + "/"
+        let keysToRemove = verifiedFiles.keys.filter {
+            $0 == path || $0.hasPrefix(childPrefix)
+        }
+        for key in keysToRemove {
+            verifiedFiles.removeValue(forKey: key)
+        }
     }
 
     private func releaseContainsManifest(_ directory: URL, items: [ManifestItem]) throws -> Bool {
@@ -1043,6 +1146,22 @@ enum KoalaSignagePlayer {
                                             "Remote playlist activated atomically: "
                                             + "\(release.playlistID.uuidString) version \(release.version)."
                                         )
+                                        do {
+                                            let cleanup = try await downloadManager.cleanupAfterActivation(
+                                                activeRelease: release
+                                            )
+                                            logger.log(
+                                                "Post-activation cleanup completed. Staging entries removed: "
+                                                + "\(cleanup.stagingEntriesRemoved); releases removed: "
+                                                + "\(cleanup.releasesRemoved); previous release kept: "
+                                                + "\(cleanup.previousReleaseKept ?? "none")."
+                                            )
+                                        } catch {
+                                            logger.log(
+                                                "Post-activation cleanup failed; active playback is unaffected. "
+                                                + "Error: \(error)"
+                                            )
+                                        }
                                     }
                                 } catch {
                                     logger.log("Remote activation failed; previous playback remains available. Error: \(error)")

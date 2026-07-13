@@ -27,6 +27,8 @@ All notable changes to this project will be documented in this file.
 - Installed playlist identity and version persistence
 - Remote playlist restoration after service or device restart
 - Serialized local and remote playlist updates
+- Post-activation staging cleanup
+- Obsolete release cleanup with active and previous release retention
 
 ### Changed
 

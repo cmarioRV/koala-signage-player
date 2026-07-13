@@ -212,6 +212,35 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     #expect(release.entries[0].contains("/.remote/"))
     #expect(try Data(contentsOf: URL(fileURLWithPath: release.entries[0])) == Data([0x01, 0x02, 0x03]))
     #expect(FileManager.default.fileExists(atPath: staging.appendingPathComponent("video.mp4").path))
+
+    let releasesRoot = URL(fileURLWithPath: release.directory).deletingLastPathComponent()
+    let newerPreviousRelease = releasesRoot.appendingPathComponent("previous-newer", isDirectory: true)
+    let olderPreviousRelease = releasesRoot.appendingPathComponent("previous-older", isDirectory: true)
+    let interruptedRelease = releasesRoot.appendingPathComponent(".pending-interrupted", isDirectory: true)
+
+    for directory in [newerPreviousRelease, olderPreviousRelease, interruptedRelease] {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data([0x04]).write(to: directory.appendingPathComponent("video.mp4"))
+    }
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 200)],
+        ofItemAtPath: newerPreviousRelease.path
+    )
+    try FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 100)],
+        ofItemAtPath: olderPreviousRelease.path
+    )
+
+    let cleanup = try await manager.cleanupAfterActivation(activeRelease: release)
+
+    #expect(cleanup.stagingEntriesRemoved == 1)
+    #expect(cleanup.releasesRemoved == 2)
+    #expect(cleanup.previousReleaseKept.map { URL(fileURLWithPath: $0).lastPathComponent } == "previous-newer")
+    #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("video.mp4").path))
+    #expect(FileManager.default.fileExists(atPath: release.directory))
+    #expect(FileManager.default.fileExists(atPath: newerPreviousRelease.path))
+    #expect(!FileManager.default.fileExists(atPath: olderPreviousRelease.path))
+    #expect(!FileManager.default.fileExists(atPath: interruptedRelease.path))
 }
 
 @Test func calculatesSHA256ForAFileWithoutLoadingItIntoThePlayer() throws {
