@@ -47,6 +47,7 @@ Koala Signage
 * ✅ Local schedule evaluation and scheduled release preparation
 * ✅ Automatic scheduled playlist activation and fallback restoration while online
 * ✅ Cached-manifest schedule evaluation during server outages
+* ✅ Current media asset heartbeat telemetry
 * ✅ Lightweight architecture
 
 ## Planned

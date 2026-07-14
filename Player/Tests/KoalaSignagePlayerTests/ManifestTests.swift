@@ -199,6 +199,43 @@ private func schedule(
     ) == .updateAvailable)
 }
 
+@Test func mapsTheCurrentMPVPathToTheManifestAssetID() {
+    let fallbackID = UUID()
+    let scheduledID = UUID()
+    let fallback = ManifestItem(
+        id: fallbackID, name: "Fallback", filename: "fallback.mp4",
+        relativeURL: "/media/fallback.mp4", sha256: String(repeating: "a", count: 64),
+        sizeBytes: 1, durationSeconds: 1, position: 0
+    )
+    let scheduled = ManifestItem(
+        id: scheduledID, name: "Scheduled", filename: "scheduled.mp4",
+        relativeURL: "/media/scheduled.mp4", sha256: String(repeating: "b", count: 64),
+        sizeBytes: 1, durationSeconds: 1, position: 0
+    )
+    let manifest = ManifestResponse(
+        playlistID: UUID(), version: 1, generatedAt: Date(), items: [fallback],
+        schedules: [ManifestSchedule(
+            id: UUID(), name: "Schedule", timezone: "America/Bogota",
+            startMinute: 360, endMinute: 660, weekdayMask: 127, priority: 10,
+            playlistID: UUID(), version: 1, items: [scheduled]
+        )]
+    )
+
+    #expect(
+        currentAssetID(
+            forPlaybackPath: "/var/lib/koala-signage/content/.remote/fallback-v1/fallback.mp4",
+            manifest: manifest
+        ) == fallbackID
+    )
+    #expect(
+        currentAssetID(
+            forPlaybackPath: "/var/lib/koala-signage/content/.remote/scheduled-v1/scheduled.mp4",
+            manifest: manifest
+        ) == scheduledID
+    )
+    #expect(currentAssetID(forPlaybackPath: "/local/unmanaged.mp4", manifest: manifest) == nil)
+}
+
 @Test func decodesLegacyManifestWithoutSchedules() throws {
     let json = #"{"playlistID":"BE7714C5-BA21-4E57-AF9E-1B0E1CD6DB37","version":2,"generatedAt":"2026-07-13T04:47:51Z","items":[]}"#
     let decoder = JSONDecoder()

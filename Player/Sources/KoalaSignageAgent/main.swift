@@ -247,6 +247,17 @@ private func weekdayIsEnabled(index: Int, mask: Int) -> Bool {
     (mask & (1 << index)) != 0
 }
 
+func currentAssetID(
+    forPlaybackPath path: String?,
+    manifest: ManifestResponse?
+) -> UUID? {
+    guard let path, let manifest else { return nil }
+    let filename = URL(fileURLWithPath: path).lastPathComponent
+    return (manifest.items + manifest.schedules.flatMap(\.items))
+        .first(where: { $0.filename == filename })?
+        .id
+}
+
 func shouldRestoreRemotePlaylist(state: PersistedState, playlistIsUsable: Bool) -> Bool {
     state.installedPlaylistID != nil
         && state.installedPlaylistVersion != nil
@@ -522,6 +533,42 @@ final class MPVClient: @unchecked Sendable {
     }
 
     func send(command: [String]) throws {
+        let descriptor = try connectedSocket()
+        defer { close(descriptor) }
+        try writeCommand(command, to: descriptor)
+    }
+
+    func stringProperty(_ property: String) throws -> String? {
+        let descriptor = try connectedSocket()
+        defer { close(descriptor) }
+        try writeCommand(["get_property", property], to: descriptor)
+
+        var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+        guard poll(&pollDescriptor, 1, 1_000) > 0 else { throw AgentError.invalidResponse }
+
+        var response = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while response.count < 65_536 {
+            let count = buffer.withUnsafeMutableBytes { bytes in
+                read(descriptor, bytes.baseAddress, bytes.count)
+            }
+            guard count > 0 else { throw AgentError.invalidResponse }
+            response.append(contentsOf: buffer.prefix(count))
+            if response.contains(0x0A) { break }
+        }
+
+        guard let newline = response.firstIndex(of: 0x0A) else { throw AgentError.invalidResponse }
+        let payload = response[..<newline]
+        guard
+            let object = try JSONSerialization.jsonObject(with: Data(payload)) as? [String: Any],
+            object["error"] as? String == "success"
+        else {
+            throw AgentError.invalidResponse
+        }
+        return object["data"] as? String
+    }
+
+    private func connectedSocket() throws -> Int32 {
         #if os(Linux)
         let socketType = Int32(SOCK_STREAM.rawValue)
         #else
@@ -529,12 +576,14 @@ final class MPVClient: @unchecked Sendable {
         #endif
         let descriptor = socket(AF_UNIX, socketType, 0)
         guard descriptor >= 0 else { throw AgentError.socketConnectionFailed(errno) }
-        defer { close(descriptor) }
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let maxLength = MemoryLayout.size(ofValue: address.sun_path)
-        guard socketPath.utf8.count < maxLength else { throw AgentError.socketConnectionFailed(ENAMETOOLONG) }
+        guard socketPath.utf8.count < maxLength else {
+            close(descriptor)
+            throw AgentError.socketConnectionFailed(ENAMETOOLONG)
+        }
 
         withUnsafeMutablePointer(to: &address.sun_path) { pointer in
             pointer.withMemoryRebound(to: CChar.self, capacity: maxLength) { chars in
@@ -547,8 +596,15 @@ final class MPVClient: @unchecked Sendable {
                 connect(descriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard result == 0 else { throw AgentError.socketConnectionFailed(errno) }
+        guard result == 0 else {
+            let code = errno
+            close(descriptor)
+            throw AgentError.socketConnectionFailed(code)
+        }
+        return descriptor
+    }
 
+    private func writeCommand(_ command: [String], to descriptor: Int32) throws {
         let payload = try JSONSerialization.data(withJSONObject: ["command": command]) + Data([0x0A])
         try payload.withUnsafeBytes { buffer in
             guard let base = buffer.baseAddress else { return }
@@ -617,6 +673,10 @@ final class MPVManager: @unchecked Sendable {
             }
         }
         throw lastError ?? AgentError.invalidResponse
+    }
+
+    func currentPath() throws -> String? {
+        try MPVClient(socketPath: config.mpvSocketPath).stringProperty("path")
     }
 }
 
@@ -1348,16 +1408,25 @@ enum KoalaSignagePlayer {
                 while !Task.isCancelled {
                     if let playerID = stateStore.load().playerID {
                         do {
+                            let installedState = stateStore.load()
+                            let playbackPath = try? mpvManager.currentPath()
+                            let playingAssetID = currentAssetID(
+                                forPlaybackPath: playbackPath,
+                                manifest: manifestStore.load()
+                            )
                             try await serverClient.sendHeartbeat(
                                 playerID: playerID,
                                 payload: HeartbeatRequest(
                                     appVersion: config.appVersion,
-                                    currentAssetID: nil,
-                                    installedPlaylistVersion: stateStore.load().installedPlaylistVersion,
+                                    currentAssetID: playingAssetID,
+                                    installedPlaylistVersion: installedState.installedPlaylistVersion,
                                     freeStorageBytes: freeStorageBytes(at: config.contentDirectory)
                                 )
                             )
-                            logger.log("Heartbeat sent successfully.")
+                            logger.log(
+                                "Heartbeat sent successfully. Current asset: "
+                                + "\(playingAssetID?.uuidString ?? "none")."
+                            )
                         } catch {
                             logger.log("Heartbeat failed; playback is unaffected. Error: \(error)")
                         }

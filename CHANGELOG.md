@@ -42,6 +42,8 @@ All notable changes to this project will be documented in this file.
 - Atomic persistence of the last successfully fetched manifest
 - Offline schedule and fallback reevaluation from the cached manifest
 - Verified asset recovery from retained releases without network access
+- MPV current-path inspection through JSON IPC
+- Current media asset reporting in Player heartbeats
 
 ### Changed
 
@@ -51,4 +53,4 @@ All notable changes to this project will be documented in this file.
 - Raspberry installer now deploys the current player binary and preserves existing configuration
 - systemd deployment now creates all runtime directories and starts the updated service
 - Player logs now write directly to standard output for immediate systemd journal visibility
-- Example Player version updated to 0.1.11
+- Example Player version updated to 0.1.12
