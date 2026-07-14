@@ -53,4 +53,6 @@ All notable changes to this project will be documented in this file.
 - Raspberry installer now deploys the current player binary and preserves existing configuration
 - systemd deployment now creates all runtime directories and starts the updated service
 - Player logs now write directly to standard output for immediate systemd journal visibility
+- Raspberry deployment now uses `install.sh` for provisioning and `deploy-rpi.sh` for upgrades
+- Routine deployments preserve configuration, synchronize `appVersion`, and roll back failed releases
 - Example Player version updated to 0.1.12

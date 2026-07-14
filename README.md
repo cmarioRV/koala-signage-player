@@ -160,7 +160,29 @@ cd Player
 ./Scripts/install.sh
 ```
 
-The installer builds the release binary, creates the required content, staging, playlist, and state directories, installs the existing `koala-signage-agent.service`, and restarts it. An existing `/etc/koala-signage/config.json` is preserved during upgrades.
+Use `install.sh` only for first-time Raspberry Pi provisioning. It installs system
+packages, runtime directories, the systemd unit, the initial configuration and the
+Player binary.
+
+For normal upgrades, use the deployment script from the Raspberry repository clone:
+
+```bash
+./Scripts/deploy-rpi.sh
+```
+
+`deploy-rpi.sh` requires a clean branch, fast-forwards it from its remote, builds the
+release binary, preserves the existing configuration, updates only `appVersion`, and
+rolls back both the binary and configuration if the service fails to start. When the
+desired commit is already present locally and no Git remote update is required, run:
+
+```bash
+SKIP_GIT_UPDATE=1 ./Scripts/deploy-rpi.sh
+```
+
+The installer creates the required content, staging, playlist, and state directories
+and installs the `koala-signage-agent.service`. Both scripts preserve the operational
+values in `/etc/koala-signage/config.json`; routine deployment changes only its
+`appVersion` field.
 
 Player logs are written directly to the systemd journal and can be followed without buffering:
 
