@@ -44,6 +44,7 @@ All notable changes to this project will be documented in this file.
 - Verified asset recovery from retained releases without network access
 - MPV current-path inspection through JSON IPC
 - Current media asset reporting in Player heartbeats
+- Active playlist identity reporting in Player heartbeats
 
 ### Changed
 
@@ -55,4 +56,4 @@ All notable changes to this project will be documented in this file.
 - Player logs now write directly to standard output for immediate systemd journal visibility
 - Raspberry deployment now uses `install.sh` for provisioning and `deploy-rpi.sh` for upgrades
 - Routine deployments preserve configuration, synchronize `appVersion`, and roll back failed releases
-- Example Player version updated to 0.1.12
+- Example Player version updated to 0.1.13

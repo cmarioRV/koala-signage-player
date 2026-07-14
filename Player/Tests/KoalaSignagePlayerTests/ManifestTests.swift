@@ -236,6 +236,25 @@ private func schedule(
     #expect(currentAssetID(forPlaybackPath: "/local/unmanaged.mp4", manifest: manifest) == nil)
 }
 
+@Test func heartbeatEncodesInstalledPlaylistIdentityAndVersion() throws {
+    let playlistID = UUID()
+    let assetID = UUID()
+    let payload = HeartbeatRequest(
+        appVersion: "0.1.13",
+        currentAssetID: assetID,
+        installedPlaylistID: playlistID,
+        installedPlaylistVersion: 4,
+        freeStorageBytes: 12_000_000_000
+    )
+
+    let data = try JSONEncoder().encode(payload)
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+    #expect(object["currentAssetID"] as? String == assetID.uuidString)
+    #expect(object["installedPlaylistID"] as? String == playlistID.uuidString)
+    #expect(object["installedPlaylistVersion"] as? Int == 4)
+}
+
 @Test func decodesLegacyManifestWithoutSchedules() throws {
     let json = #"{"playlistID":"BE7714C5-BA21-4E57-AF9E-1B0E1CD6DB37","version":2,"generatedAt":"2026-07-13T04:47:51Z","items":[]}"#
     let decoder = JSONDecoder()

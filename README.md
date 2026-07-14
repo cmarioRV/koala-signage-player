@@ -48,6 +48,7 @@ Koala Signage
 * ✅ Automatic scheduled playlist activation and fallback restoration while online
 * ✅ Cached-manifest schedule evaluation during server outages
 * ✅ Current media asset heartbeat telemetry
+* ✅ Active playlist identity and version heartbeat telemetry
 * ✅ Lightweight architecture
 
 ## Planned

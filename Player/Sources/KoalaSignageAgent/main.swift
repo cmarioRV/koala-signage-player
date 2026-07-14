@@ -89,6 +89,7 @@ struct PlayerResponse: Decodable {
 struct HeartbeatRequest: Encodable {
     let appVersion: String
     let currentAssetID: UUID?
+    let installedPlaylistID: UUID?
     let installedPlaylistVersion: Int?
     let freeStorageBytes: Int64?
 }
@@ -1419,6 +1420,7 @@ enum KoalaSignagePlayer {
                                 payload: HeartbeatRequest(
                                     appVersion: config.appVersion,
                                     currentAssetID: playingAssetID,
+                                    installedPlaylistID: installedState.installedPlaylistID,
                                     installedPlaylistVersion: installedState.installedPlaylistVersion,
                                     freeStorageBytes: freeStorageBytes(at: config.contentDirectory)
                                 )
