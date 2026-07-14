@@ -747,6 +747,14 @@ actor DownloadManager {
         return try await stage(items: items)
     }
 
+    func stageSelectedSchedule(
+        _ schedule: ManifestSchedule,
+        from manifest: ManifestResponse
+    ) async throws -> DownloadSummary {
+        try validateAssetDefinitions(in: manifest)
+        return try await stage(items: schedule.items)
+    }
+
     private func stage(items: [ManifestItem]) async throws -> DownloadSummary {
         try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         var summary = DownloadSummary()
@@ -928,7 +936,10 @@ actor DownloadManager {
         )
     }
 
-    func cleanupAfterActivation(activeRelease: PreparedRelease) throws -> CleanupSummary {
+    func cleanupAfterActivation(
+        activeRelease: PreparedRelease,
+        removeStagingEntries: Bool = true
+    ) throws -> CleanupSummary {
         let releasesRoot = contentDirectory
             .appendingPathComponent(".remote", isDirectory: true)
             .standardizedFileURL
@@ -941,7 +952,7 @@ actor DownloadManager {
         }
 
         var stagingEntriesRemoved = 0
-        if fileManager.fileExists(atPath: stagingDirectory.path) {
+        if removeStagingEntries && fileManager.fileExists(atPath: stagingDirectory.path) {
             let stagedEntries = try fileManager.contentsOfDirectory(
                 at: stagingDirectory,
                 includingPropertiesForKeys: nil
@@ -1279,22 +1290,88 @@ enum KoalaSignagePlayer {
                                 + "schedules: \(manifest.schedules.count)."
                             )
 
-                            switch compareManifest(
-                                installedPlaylistID: installedState.installedPlaylistID,
-                                installedVersion: installedVersion,
-                                remotePlaylistID: manifest.playlistID,
-                                remoteVersion: manifest.version
-                            ) {
-                            case .updateAvailable:
-                                logger.log("Remote playlist update available; staging missing assets.")
-                                do {
+                            if let schedule = selectedSchedule(from: manifest.schedules, at: Date()) {
+                                logger.log("Scheduled playlist is active: \(schedule.name).")
+                                let summary = try await downloadManager.stageSelectedSchedule(
+                                    schedule,
+                                    from: manifest
+                                )
+                                logger.log(
+                                    "Scheduled asset cache completed. Downloaded: \(summary.downloaded); "
+                                    + "skipped: \(summary.skipped); failed: \(summary.failed)."
+                                )
+
+                                switch compareManifest(
+                                    installedPlaylistID: installedState.installedPlaylistID,
+                                    installedVersion: installedVersion,
+                                    remotePlaylistID: schedule.playlistID,
+                                    remoteVersion: schedule.version
+                                ) {
+                                case .updateAvailable where summary.failed == 0:
+                                    let release = try await downloadManager.prepareRelease(from: schedule)
+                                    try playbackUpdates.withLock {
+                                        try playlistManager.write(
+                                            entries: release.entries,
+                                            description: "scheduled"
+                                        )
+                                        try mpvManager.reloadPlaylist()
+                                        var state = stateStore.load()
+                                        state.installedPlaylistID = release.playlistID
+                                        state.installedPlaylistVersion = release.version
+                                        try stateStore.save(state)
+                                    }
+                                    logger.log(
+                                        "Scheduled playlist activated atomically: \(schedule.name); "
+                                        + "playlist \(release.playlistID.uuidString) version \(release.version)."
+                                    )
+                                    do {
+                                        let cleanup = try await downloadManager.cleanupAfterActivation(
+                                            activeRelease: release,
+                                            removeStagingEntries: false
+                                        )
+                                        logger.log(
+                                            "Post-activation cleanup completed. Staging entries removed: "
+                                            + "\(cleanup.stagingEntriesRemoved); releases removed: "
+                                            + "\(cleanup.releasesRemoved); previous release kept: "
+                                            + "\(cleanup.previousReleaseKept ?? "none")."
+                                        )
+                                    } catch {
+                                        logger.log(
+                                            "Post-activation cleanup failed; active playback is unaffected. "
+                                            + "Error: \(error)"
+                                        )
+                                    }
+                                case .updateAvailable:
+                                    logger.log(
+                                        "Scheduled playlist was not activated because some assets failed."
+                                    )
+                                case .upToDate:
+                                    logger.log("Active scheduled playlist matches the installed version.")
+                                case .localVersionAhead:
+                                    logger.log("Installed scheduled playlist is ahead of the remote version.")
+                                }
+
+                                let prefetch = try await downloadManager.stageScheduledAssets(from: manifest)
+                                logger.log(
+                                    "Scheduled asset cache completed. Downloaded: \(prefetch.downloaded); "
+                                    + "skipped: \(prefetch.skipped); failed: \(prefetch.failed)."
+                                )
+                            } else {
+                                switch compareManifest(
+                                    installedPlaylistID: installedState.installedPlaylistID,
+                                    installedVersion: installedVersion,
+                                    remotePlaylistID: manifest.playlistID,
+                                    remoteVersion: manifest.version
+                                ) {
+                                case .updateAvailable:
+                                    logger.log("Fallback playlist selected; staging missing assets.")
                                     let summary = try await downloadManager.stageMissingAssets(from: manifest)
                                     logger.log(
                                         "Staging sync completed. Downloaded: \(summary.downloaded); "
                                         + "skipped: \(summary.skipped); failed: \(summary.failed)."
                                     )
                                     if summary.failed > 0 {
-                                        logger.log("Remote playlist was not activated because some assets failed.")
+                                        logger.log("Fallback playlist was not activated because some assets failed.")
                                     } else {
                                         let release = try await downloadManager.prepareRelease(from: manifest)
                                         try playbackUpdates.withLock {
@@ -1303,13 +1380,13 @@ enum KoalaSignagePlayer {
                                                 description: "remote"
                                             )
                                             try mpvManager.reloadPlaylist()
-                                            var installedState = stateStore.load()
-                                            installedState.installedPlaylistID = release.playlistID
-                                            installedState.installedPlaylistVersion = release.version
-                                            try stateStore.save(installedState)
+                                            var state = stateStore.load()
+                                            state.installedPlaylistID = release.playlistID
+                                            state.installedPlaylistVersion = release.version
+                                            try stateStore.save(state)
                                         }
                                         logger.log(
-                                            "Remote playlist activated atomically: "
+                                            "Fallback playlist activated atomically: "
                                             + "\(release.playlistID.uuidString) version \(release.version)."
                                         )
                                         do {
@@ -1329,30 +1406,17 @@ enum KoalaSignagePlayer {
                                             )
                                         }
                                     }
-                                } catch {
-                                    logger.log("Remote activation failed; previous playback remains available. Error: \(error)")
+                                case .upToDate:
+                                    logger.log("Fallback playlist matches the installed version.")
+                                case .localVersionAhead:
+                                    logger.log("Installed fallback playlist is ahead of the remote version.")
                                 }
-                            case .upToDate:
-                                logger.log("Remote manifest matches the installed playlist version.")
-                            case .localVersionAhead:
-                                logger.log("Installed playlist version is ahead of the remote manifest.")
-                            }
 
-                            if !manifest.schedules.isEmpty {
-                                let summary = try await downloadManager.stageScheduledAssets(
-                                    from: manifest
-                                )
-                                logger.log(
-                                    "Scheduled asset cache completed. Downloaded: \(summary.downloaded); "
-                                    + "skipped: \(summary.skipped); failed: \(summary.failed)."
-                                )
-                                if summary.failed == 0,
-                                   let schedule = selectedSchedule(from: manifest.schedules, at: Date()) {
-                                    let release = try await downloadManager.prepareRelease(from: schedule)
+                                if !manifest.schedules.isEmpty {
+                                    let summary = try await downloadManager.stageScheduledAssets(from: manifest)
                                     logger.log(
-                                        "Scheduled playlist selected and prepared (not activated): "
-                                        + "\(schedule.name); playlist \(release.playlistID.uuidString) "
-                                        + "version \(release.version)."
+                                        "Scheduled asset cache completed. Downloaded: \(summary.downloaded); "
+                                        + "skipped: \(summary.skipped); failed: \(summary.failed)."
                                     )
                                 }
                             }

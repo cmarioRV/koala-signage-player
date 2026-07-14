@@ -405,6 +405,10 @@ private func schedule(
 
     let summary = try await manager.stageScheduledAssets(from: manifest)
     let release = try await manager.prepareRelease(from: manifest.schedules[0])
+    let cleanup = try await manager.cleanupAfterActivation(
+        activeRelease: release,
+        removeStagingEntries: false
+    )
 
     #expect(summary == DownloadSummary(downloaded: 1, skipped: 0, failed: 0))
     #expect(try Data(contentsOf: staging.appendingPathComponent("scheduled.mp4")) == Data([1, 2, 3]))
@@ -413,6 +417,53 @@ private func schedule(
     #expect(release.version == manifest.schedules[0].version)
     #expect(release.entries.count == 1)
     #expect(FileManager.default.fileExists(atPath: release.entries[0]))
+    #expect(cleanup.stagingEntriesRemoved == 0)
+    #expect(FileManager.default.fileExists(atPath: staging.appendingPathComponent("scheduled.mp4").path))
+}
+
+@Test func stagesOnlyTheSelectedScheduleBeforeActivation() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let staging = root.appendingPathComponent("staging", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
+    let manager = try DownloadManager(
+        serverURL: "http://192.168.1.25:8080",
+        contentDirectory: root.appendingPathComponent("content").path,
+        stagingDirectory: staging.path,
+        logger: Logger(),
+        session: URLSession(configuration: sessionConfiguration)
+    )
+    func item(_ filename: String) -> ManifestItem {
+        ManifestItem(
+            id: UUID(), name: filename, filename: filename,
+            relativeURL: "/media/\(filename)",
+            sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+            sizeBytes: 3, durationSeconds: 1, position: 0
+        )
+    }
+    let selected = ManifestSchedule(
+        id: UUID(), name: "Selected", timezone: "America/Bogota",
+        startMinute: 360, endMinute: 660, weekdayMask: 127, priority: 20,
+        playlistID: UUID(), version: 1, items: [item("selected.mp4")]
+    )
+    let later = ManifestSchedule(
+        id: UUID(), name: "Later", timezone: "America/Bogota",
+        startMinute: 660, endMinute: 900, weekdayMask: 127, priority: 10,
+        playlistID: UUID(), version: 1, items: [item("later.mp4")]
+    )
+    let manifest = ManifestResponse(
+        playlistID: UUID(), version: 1, generatedAt: Date(), items: [],
+        schedules: [selected, later]
+    )
+
+    let summary = try await manager.stageSelectedSchedule(selected, from: manifest)
+
+    #expect(summary == DownloadSummary(downloaded: 1, skipped: 0, failed: 0))
+    #expect(FileManager.default.fileExists(atPath: staging.appendingPathComponent("selected.mp4").path))
+    #expect(!FileManager.default.fileExists(atPath: staging.appendingPathComponent("later.mp4").path))
 }
 
 @Test func rejectsConflictingFilenamesAcrossFallbackAndSchedules() async throws {

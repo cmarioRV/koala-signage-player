@@ -36,6 +36,9 @@ All notable changes to this project will be documented in this file.
 - Cross-midnight schedule evaluation using the schedule's starting weekday
 - Deterministic priority resolution for overlapping schedules
 - Immutable release preparation for the currently selected scheduled playlist
+- Automatic activation of the highest-priority active scheduled playlist
+- Automatic fallback restoration when no schedule is active
+- Scheduled staging retention during schedule transitions
 
 ### Changed
 
@@ -45,4 +48,4 @@ All notable changes to this project will be documented in this file.
 - Raspberry installer now deploys the current player binary and preserves existing configuration
 - systemd deployment now creates all runtime directories and starts the updated service
 - Player logs now write directly to standard output for immediate systemd journal visibility
-- Example Player version updated to 0.1.9
+- Example Player version updated to 0.1.10
