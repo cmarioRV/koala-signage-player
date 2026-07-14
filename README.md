@@ -44,6 +44,7 @@ Koala Signage
 * ✅ Remote playlist restoration after restart
 * ✅ Safe staging and obsolete release cleanup
 * ✅ Scheduled manifest decoding and asset prefetching
+* ✅ Local schedule evaluation and scheduled release preparation
 * ✅ Lightweight architecture
 
 ## Planned
@@ -51,7 +52,7 @@ Koala Signage
 * ⏳ Remote content synchronization
 * ⏳ Download retry and resume support
 * ⏳ Local content cache
-* ⏳ Playlist scheduling
+* ⏳ Automatic scheduled playlist activation and offline restoration
 * ⏳ Health monitoring
 * ⏳ Remote diagnostics
 * ⏳ Automatic software updates

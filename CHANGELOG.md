@@ -32,6 +32,10 @@ All notable changes to this project will be documented in this file.
 - Backward-compatible scheduled manifest decoding
 - Scheduled asset prefetching without changing active playback
 - Cross-playlist filename conflict validation
+- Local schedule evaluation using each schedule's timezone and weekday mask
+- Cross-midnight schedule evaluation using the schedule's starting weekday
+- Deterministic priority resolution for overlapping schedules
+- Immutable release preparation for the currently selected scheduled playlist
 
 ### Changed
 
@@ -41,4 +45,4 @@ All notable changes to this project will be documented in this file.
 - Raspberry installer now deploys the current player binary and preserves existing configuration
 - systemd deployment now creates all runtime directories and starts the updated service
 - Player logs now write directly to standard output for immediate systemd journal visibility
-- Example Player version updated to 0.1.8
+- Example Player version updated to 0.1.9

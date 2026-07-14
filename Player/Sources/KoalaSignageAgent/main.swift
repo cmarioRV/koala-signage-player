@@ -188,6 +188,58 @@ func compareManifest(
     return .localVersionAhead
 }
 
+func selectedSchedule(from schedules: [ManifestSchedule], at date: Date) -> ManifestSchedule? {
+    schedules
+        .filter { scheduleIsActive($0, at: date) }
+        .sorted {
+            if $0.priority != $1.priority { return $0.priority > $1.priority }
+            if $0.startMinute != $1.startMinute { return $0.startMinute < $1.startMinute }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        .first
+}
+
+private func scheduleIsActive(_ schedule: ManifestSchedule, at date: Date) -> Bool {
+    guard
+        let timezone = TimeZone(identifier: schedule.timezone),
+        (0..<1_440).contains(schedule.startMinute),
+        (1...1_440).contains(schedule.endMinute),
+        schedule.startMinute != schedule.endMinute,
+        (1...127).contains(schedule.weekdayMask)
+    else {
+        return false
+    }
+
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timezone
+    let components = calendar.dateComponents([.weekday, .hour, .minute], from: date)
+    guard let weekday = components.weekday, let hour = components.hour, let minute = components.minute else {
+        return false
+    }
+
+    let minuteOfDay = (hour * 60) + minute
+    let weekdayIndex = (weekday + 5) % 7 // Monday = bit 0; Sunday = bit 6.
+
+    if schedule.startMinute < schedule.endMinute {
+        return minuteOfDay >= schedule.startMinute
+            && minuteOfDay < schedule.endMinute
+            && weekdayIsEnabled(index: weekdayIndex, mask: schedule.weekdayMask)
+    }
+
+    if minuteOfDay >= schedule.startMinute {
+        return weekdayIsEnabled(index: weekdayIndex, mask: schedule.weekdayMask)
+    }
+    if minuteOfDay < schedule.endMinute {
+        let previousWeekdayIndex = (weekdayIndex + 6) % 7
+        return weekdayIsEnabled(index: previousWeekdayIndex, mask: schedule.weekdayMask)
+    }
+    return false
+}
+
+private func weekdayIsEnabled(index: Int, mask: Int) -> Bool {
+    (mask & (1 << index)) != 0
+}
+
 func shouldRestoreRemotePlaylist(state: PersistedState, playlistIsUsable: Bool) -> Bool {
     state.installedPlaylistID != nil
         && state.installedPlaylistVersion != nil
@@ -759,7 +811,27 @@ actor DownloadManager {
     }
 
     func prepareRelease(from manifest: ManifestResponse) throws -> PreparedRelease {
-        let sortedItems = manifest.items.sorted(by: { $0.position < $1.position })
+        try prepareRelease(
+            playlistID: manifest.playlistID,
+            version: manifest.version,
+            items: manifest.items
+        )
+    }
+
+    func prepareRelease(from schedule: ManifestSchedule) throws -> PreparedRelease {
+        try prepareRelease(
+            playlistID: schedule.playlistID,
+            version: schedule.version,
+            items: schedule.items
+        )
+    }
+
+    private func prepareRelease(
+        playlistID: UUID,
+        version: Int,
+        items: [ManifestItem]
+    ) throws -> PreparedRelease {
+        let sortedItems = items.sorted(by: { $0.position < $1.position })
         guard !sortedItems.isEmpty else { throw AgentError.emptyManifest }
 
         var positions = Set<Int>()
@@ -781,12 +853,17 @@ actor DownloadManager {
 
         let releasesRoot = contentDirectory.appendingPathComponent(".remote", isDirectory: true)
         try fileManager.createDirectory(at: releasesRoot, withIntermediateDirectories: true)
-        let releaseName = "\(manifest.playlistID.uuidString.lowercased())-v\(manifest.version)"
+        let releaseName = "\(playlistID.uuidString.lowercased())-v\(version)"
         let preferredRelease = releasesRoot.appendingPathComponent(releaseName, isDirectory: true)
 
         if try releaseContainsManifest(preferredRelease, items: sortedItems) {
             logger.log("Verified release already exists: \(releaseName)")
-            return preparedRelease(manifest: manifest, directory: preferredRelease, items: sortedItems)
+            return preparedRelease(
+                playlistID: playlistID,
+                version: version,
+                directory: preferredRelease,
+                items: sortedItems
+            )
         }
 
         let temporaryRelease = releasesRoot.appendingPathComponent(
@@ -843,7 +920,12 @@ actor DownloadManager {
         }
         try fileManager.moveItem(at: temporaryRelease, to: finalRelease)
         logger.log("Versioned release prepared: \(finalRelease.lastPathComponent)")
-        return preparedRelease(manifest: manifest, directory: finalRelease, items: sortedItems)
+        return preparedRelease(
+            playlistID: playlistID,
+            version: version,
+            directory: finalRelease,
+            items: sortedItems
+        )
     }
 
     func cleanupAfterActivation(activeRelease: PreparedRelease) throws -> CleanupSummary {
@@ -958,13 +1040,14 @@ actor DownloadManager {
     }
 
     private func preparedRelease(
-        manifest: ManifestResponse,
+        playlistID: UUID,
+        version: Int,
         directory: URL,
         items: [ManifestItem]
     ) -> PreparedRelease {
         PreparedRelease(
-            playlistID: manifest.playlistID,
-            version: manifest.version,
+            playlistID: playlistID,
+            version: version,
             directory: directory.path,
             entries: items.map {
                 directory.appendingPathComponent($0.filename, isDirectory: false).path
@@ -1263,6 +1346,15 @@ enum KoalaSignagePlayer {
                                     "Scheduled asset cache completed. Downloaded: \(summary.downloaded); "
                                     + "skipped: \(summary.skipped); failed: \(summary.failed)."
                                 )
+                                if summary.failed == 0,
+                                   let schedule = selectedSchedule(from: manifest.schedules, at: Date()) {
+                                    let release = try await downloadManager.prepareRelease(from: schedule)
+                                    logger.log(
+                                        "Scheduled playlist selected and prepared (not activated): "
+                                        + "\(schedule.name); playlist \(release.playlistID.uuidString) "
+                                        + "version \(release.version)."
+                                    )
+                                }
                             }
                         } catch {
                             logger.log("Manifest polling failed; local playback is unaffected. Error: \(error)")

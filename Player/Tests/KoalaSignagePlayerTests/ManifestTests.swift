@@ -25,6 +25,94 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private func bogotaDate(
+    year: Int = 2026,
+    month: Int = 7,
+    day: Int,
+    hour: Int,
+    minute: Int = 0
+) throws -> Date {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "America/Bogota"))
+    return try #require(calendar.date(from: DateComponents(
+        year: year,
+        month: month,
+        day: day,
+        hour: hour,
+        minute: minute
+    )))
+}
+
+private func schedule(
+    name: String,
+    startMinute: Int,
+    endMinute: Int,
+    weekdayMask: Int,
+    priority: Int
+) -> ManifestSchedule {
+    ManifestSchedule(
+        id: UUID(),
+        name: name,
+        timezone: "America/Bogota",
+        startMinute: startMinute,
+        endMinute: endMinute,
+        weekdayMask: weekdayMask,
+        priority: priority,
+        playlistID: UUID(),
+        version: 1,
+        items: []
+    )
+}
+
+@Test func selectsActiveScheduleUsingItsLocalTimezoneAndWeekday() throws {
+    let breakfast = schedule(
+        name: "Desayuno",
+        startMinute: 360,
+        endMinute: 660,
+        weekdayMask: 1, // Monday
+        priority: 10
+    )
+
+    #expect(selectedSchedule(from: [breakfast], at: try bogotaDate(day: 13, hour: 7))?.name == "Desayuno")
+    #expect(selectedSchedule(from: [breakfast], at: try bogotaDate(day: 13, hour: 12)) == nil)
+}
+
+@Test func overlappingSchedulesSelectHighestPriority() throws {
+    let standard = schedule(
+        name: "Estándar",
+        startMinute: 360,
+        endMinute: 660,
+        weekdayMask: 1,
+        priority: 10
+    )
+    let campaign = schedule(
+        name: "Campaña",
+        startMinute: 420,
+        endMinute: 600,
+        weekdayMask: 1,
+        priority: 20
+    )
+
+    #expect(
+        selectedSchedule(from: [standard, campaign], at: try bogotaDate(day: 13, hour: 8))?.name
+            == "Campaña"
+    )
+}
+
+@Test func crossMidnightScheduleUsesTheStartingWeekday() throws {
+    let overnight = schedule(
+        name: "Noche",
+        startMinute: 1_320,
+        endMinute: 120,
+        weekdayMask: 1, // Starts Monday and continues into Tuesday.
+        priority: 10
+    )
+
+    #expect(selectedSchedule(from: [overnight], at: try bogotaDate(day: 13, hour: 23))?.name == "Noche")
+    #expect(selectedSchedule(from: [overnight], at: try bogotaDate(day: 14, hour: 1))?.name == "Noche")
+    #expect(selectedSchedule(from: [overnight], at: try bogotaDate(day: 14, hour: 23)) == nil)
+}
+
 @Test func decodesConfirmedServerManifestContract() throws {
     let json = #"""
     {
@@ -316,10 +404,15 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     )
 
     let summary = try await manager.stageScheduledAssets(from: manifest)
+    let release = try await manager.prepareRelease(from: manifest.schedules[0])
 
     #expect(summary == DownloadSummary(downloaded: 1, skipped: 0, failed: 0))
     #expect(try Data(contentsOf: staging.appendingPathComponent("scheduled.mp4")) == Data([1, 2, 3]))
     #expect(!FileManager.default.fileExists(atPath: content.appendingPathComponent("scheduled.mp4").path))
+    #expect(release.playlistID == manifest.schedules[0].playlistID)
+    #expect(release.version == manifest.schedules[0].version)
+    #expect(release.entries.count == 1)
+    #expect(FileManager.default.fileExists(atPath: release.entries[0]))
 }
 
 @Test func rejectsConflictingFilenamesAcrossFallbackAndSchedules() async throws {
