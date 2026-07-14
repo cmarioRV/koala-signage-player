@@ -42,7 +42,21 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
       ],
       "playlistID": "BE7714C5-BA21-4E57-AF9E-1B0E1CD6DB37",
       "version": 2,
-      "generatedAt": "2026-07-13T04:47:51Z"
+      "generatedAt": "2026-07-13T04:47:51Z",
+      "schedules": [
+        {
+          "id": "E69DE29B-2B01-4801-B3C7-4E64667701E5",
+          "name": "Desayuno",
+          "timezone": "America/Bogota",
+          "startMinute": 360,
+          "endMinute": 660,
+          "weekdayMask": 127,
+          "priority": 10,
+          "playlistID": "A0E29D65-5875-4794-A69A-E1FCBD252870",
+          "version": 3,
+          "items": []
+        }
+      ]
     }
     """#
 
@@ -56,6 +70,9 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     #expect(manifest.items[0].id == UUID(uuidString: "BAFCF25D-41B0-4734-9EC5-F39B5875790E"))
     #expect(manifest.items[0].relativeURL == "/media/video_16_3_formatted.mp4")
     #expect(manifest.items[0].durationSeconds == 14.96)
+    #expect(manifest.schedules.count == 1)
+    #expect(manifest.schedules[0].timezone == "America/Bogota")
+    #expect(manifest.schedules[0].playlistID == UUID(uuidString: "A0E29D65-5875-4794-A69A-E1FCBD252870"))
 }
 
 @Test func comparesInstalledAndRemoteManifestVersions() {
@@ -92,6 +109,16 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
         remotePlaylistID: differentPlaylistID,
         remoteVersion: 2
     ) == .updateAvailable)
+}
+
+@Test func decodesLegacyManifestWithoutSchedules() throws {
+    let json = #"{"playlistID":"BE7714C5-BA21-4E57-AF9E-1B0E1CD6DB37","version":2,"generatedAt":"2026-07-13T04:47:51Z","items":[]}"#
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+
+    let manifest = try decoder.decode(ManifestResponse.self, from: Data(json.utf8))
+
+    #expect(manifest.schedules.isEmpty)
 }
 
 @Test func decodesLegacyStateWithoutInstalledPlaylistVersion() throws {
@@ -241,6 +268,92 @@ private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     #expect(FileManager.default.fileExists(atPath: newerPreviousRelease.path))
     #expect(!FileManager.default.fileExists(atPath: olderPreviousRelease.path))
     #expect(!FileManager.default.fileExists(atPath: interruptedRelease.path))
+}
+
+@Test func cachesScheduledAssetsWithoutChangingFallbackRelease() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let content = root.appendingPathComponent("content", isDirectory: true)
+    let staging = root.appendingPathComponent("staging", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let sessionConfiguration = URLSessionConfiguration.ephemeral
+    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
+    let manager = try DownloadManager(
+        serverURL: "http://192.168.1.25:8080",
+        contentDirectory: content.path,
+        stagingDirectory: staging.path,
+        logger: Logger(),
+        session: URLSession(configuration: sessionConfiguration)
+    )
+    let scheduledItem = ManifestItem(
+        id: UUID(),
+        name: "Desayuno",
+        filename: "scheduled.mp4",
+        relativeURL: "/media/scheduled.mp4",
+        sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+        sizeBytes: 3,
+        durationSeconds: 1,
+        position: 0
+    )
+    let manifest = ManifestResponse(
+        playlistID: UUID(),
+        version: 2,
+        generatedAt: Date(),
+        items: [],
+        schedules: [ManifestSchedule(
+            id: UUID(),
+            name: "Desayuno",
+            timezone: "America/Bogota",
+            startMinute: 360,
+            endMinute: 660,
+            weekdayMask: 127,
+            priority: 10,
+            playlistID: UUID(),
+            version: 1,
+            items: [scheduledItem]
+        )]
+    )
+
+    let summary = try await manager.stageScheduledAssets(from: manifest)
+
+    #expect(summary == DownloadSummary(downloaded: 1, skipped: 0, failed: 0))
+    #expect(try Data(contentsOf: staging.appendingPathComponent("scheduled.mp4")) == Data([1, 2, 3]))
+    #expect(!FileManager.default.fileExists(atPath: content.appendingPathComponent("scheduled.mp4").path))
+}
+
+@Test func rejectsConflictingFilenamesAcrossFallbackAndSchedules() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manager = try DownloadManager(
+        serverURL: "http://192.168.1.25:8080",
+        contentDirectory: root.appendingPathComponent("content").path,
+        stagingDirectory: root.appendingPathComponent("staging").path,
+        logger: Logger()
+    )
+    let fallback = ManifestItem(
+        id: UUID(), name: "Fallback", filename: "shared.mp4",
+        relativeURL: "/media/fallback.mp4", sha256: String(repeating: "a", count: 64),
+        sizeBytes: 3, durationSeconds: 1, position: 0
+    )
+    let scheduled = ManifestItem(
+        id: UUID(), name: "Scheduled", filename: "shared.mp4",
+        relativeURL: "/media/scheduled.mp4", sha256: String(repeating: "b", count: 64),
+        sizeBytes: 3, durationSeconds: 1, position: 0
+    )
+    let manifest = ManifestResponse(
+        playlistID: UUID(), version: 1, generatedAt: Date(), items: [fallback],
+        schedules: [ManifestSchedule(
+            id: UUID(), name: "Schedule", timezone: "America/Bogota",
+            startMinute: 360, endMinute: 660, weekdayMask: 127, priority: 10,
+            playlistID: UUID(), version: 1, items: [scheduled]
+        )]
+    )
+
+    await #expect(throws: AgentError.self) {
+        _ = try await manager.stageScheduledAssets(from: manifest)
+    }
 }
 
 @Test func calculatesSHA256ForAFileWithoutLoadingItIntoThePlayer() throws {

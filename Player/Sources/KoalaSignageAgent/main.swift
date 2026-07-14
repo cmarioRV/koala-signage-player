@@ -107,6 +107,54 @@ struct ManifestResponse: Decodable, Equatable, Sendable {
     let version: Int
     let generatedAt: Date
     let items: [ManifestItem]
+    let schedules: [ManifestSchedule]
+
+    init(
+        playlistID: UUID,
+        version: Int,
+        generatedAt: Date,
+        items: [ManifestItem],
+        schedules: [ManifestSchedule] = []
+    ) {
+        self.playlistID = playlistID
+        self.version = version
+        self.generatedAt = generatedAt
+        self.items = items
+        self.schedules = schedules
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case playlistID
+        case version
+        case generatedAt
+        case items
+        case schedules
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        playlistID = try container.decode(UUID.self, forKey: .playlistID)
+        version = try container.decode(Int.self, forKey: .version)
+        generatedAt = try container.decode(Date.self, forKey: .generatedAt)
+        items = try container.decode([ManifestItem].self, forKey: .items)
+        schedules = try container.decodeIfPresent(
+            [ManifestSchedule].self,
+            forKey: .schedules
+        ) ?? []
+    }
+}
+
+struct ManifestSchedule: Decodable, Equatable, Sendable {
+    let id: UUID
+    let name: String
+    let timezone: String
+    let startMinute: Int
+    let endMinute: Int
+    let weekdayMask: Int
+    let priority: Int
+    let playlistID: UUID
+    let version: Int
+    let items: [ManifestItem]
 }
 
 struct ManifestItem: Decodable, Equatable, Sendable {
@@ -630,10 +678,28 @@ actor DownloadManager {
     }
 
     func stageMissingAssets(from manifest: ManifestResponse) async throws -> DownloadSummary {
+        try validateAssetDefinitions(in: manifest)
+        return try await stage(items: manifest.items)
+    }
+
+    func stageScheduledAssets(from manifest: ManifestResponse) async throws -> DownloadSummary {
+        try validateAssetDefinitions(in: manifest)
+        var filenames = Set<String>()
+        var items: [ManifestItem] = []
+        for item in manifest.schedules.flatMap(\.items) {
+            let filename = try validatedFilename(for: item)
+            if filenames.insert(filename).inserted {
+                items.append(item)
+            }
+        }
+        return try await stage(items: items)
+    }
+
+    private func stage(items: [ManifestItem]) async throws -> DownloadSummary {
         try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         var summary = DownloadSummary()
 
-        for item in manifest.items.sorted(by: { $0.position < $1.position }) {
+        for item in items {
             do {
                 let filename = try validatedFilename(for: item)
                 let expectedChecksum = try validatedChecksum(for: item)
@@ -674,6 +740,22 @@ actor DownloadManager {
         }
 
         return summary
+    }
+
+    private func validateAssetDefinitions(in manifest: ManifestResponse) throws {
+        var definitions: [String: ManifestFileDefinition] = [:]
+        let allItems = manifest.items + manifest.schedules.flatMap(\.items)
+        for item in allItems {
+            let filename = try validatedFilename(for: item)
+            let definition = ManifestFileDefinition(
+                size: item.sizeBytes,
+                checksum: try validatedChecksum(for: item)
+            )
+            if let existing = definitions[filename], existing != definition {
+                throw AgentError.conflictingManifestFilename(filename)
+            }
+            definitions[filename] = definition
+        }
     }
 
     func prepareRelease(from manifest: ManifestResponse) throws -> PreparedRelease {
@@ -1110,7 +1192,8 @@ enum KoalaSignagePlayer {
                             let installedDescription = installedVersion.map(String.init) ?? "none"
                             logger.log(
                                 "Manifest received. Remote version: \(manifest.version); "
-                                + "installed version: \(installedDescription); items: \(manifest.items.count)."
+                                + "installed version: \(installedDescription); items: \(manifest.items.count); "
+                                + "schedules: \(manifest.schedules.count)."
                             )
 
                             switch compareManifest(
@@ -1170,6 +1253,16 @@ enum KoalaSignagePlayer {
                                 logger.log("Remote manifest matches the installed playlist version.")
                             case .localVersionAhead:
                                 logger.log("Installed playlist version is ahead of the remote manifest.")
+                            }
+
+                            if !manifest.schedules.isEmpty {
+                                let summary = try await downloadManager.stageScheduledAssets(
+                                    from: manifest
+                                )
+                                logger.log(
+                                    "Scheduled asset cache completed. Downloaded: \(summary.downloaded); "
+                                    + "skipped: \(summary.skipped); failed: \(summary.failed)."
+                                )
                             }
                         } catch {
                             logger.log("Manifest polling failed; local playback is unaffected. Error: \(error)")

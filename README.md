@@ -43,6 +43,7 @@ Koala Signage
 * ✅ Atomic remote playlist activation
 * ✅ Remote playlist restoration after restart
 * ✅ Safe staging and obsolete release cleanup
+* ✅ Scheduled manifest decoding and asset prefetching
 * ✅ Lightweight architecture
 
 ## Planned
@@ -180,6 +181,12 @@ Downloads use a temporary `.part` file and must match both the expected byte siz
 
 Once every manifest item is verified, the player prepares an immutable versioned release under `content/.remote`, atomically replaces `current.m3u`, reloads MPV, and only then persists the installed playlist ID and version. The player then clears staging and retains the active release plus the most recent previous release as rollback protection. An installed remote playlist is restored after a service or device restart.
 
+Enabled schedules included by the Server are decoded without affecting the
+active fallback playlist. Their assets are downloaded and SHA-256 verified
+after fallback activation and cleanup, leaving them cached in staging for the
+future offline scheduler. Conflicting definitions that reuse one filename with
+different content are rejected before caching.
+
 ---
 
 # Project Structure
@@ -234,6 +241,8 @@ KoalaSignagePlayer
 
 ## Phase 4 — Scheduling
 
+* [x] Decode scheduled playlists
+* [x] Prefetch and verify scheduled assets
 * [ ] Time-based playlists
 * [ ] Campaign scheduling
 * [ ] Fallback playlists
