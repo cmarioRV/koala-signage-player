@@ -39,6 +39,9 @@ All notable changes to this project will be documented in this file.
 - Automatic activation of the highest-priority active scheduled playlist
 - Automatic fallback restoration when no schedule is active
 - Scheduled staging retention during schedule transitions
+- Atomic persistence of the last successfully fetched manifest
+- Offline schedule and fallback reevaluation from the cached manifest
+- Verified asset recovery from retained releases without network access
 
 ### Changed
 
@@ -48,4 +51,4 @@ All notable changes to this project will be documented in this file.
 - Raspberry installer now deploys the current player binary and preserves existing configuration
 - systemd deployment now creates all runtime directories and starts the updated service
 - Player logs now write directly to standard output for immediate systemd journal visibility
-- Example Player version updated to 0.1.10
+- Example Player version updated to 0.1.11

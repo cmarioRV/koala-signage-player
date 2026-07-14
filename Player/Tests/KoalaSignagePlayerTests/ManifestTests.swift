@@ -239,6 +239,7 @@ private func schedule(
 
     #expect(configuration.manifestPollIntervalSeconds == 30)
     #expect(configuration.stagingDirectory == "/var/lib/koala-signage/staging")
+    #expect(configuration.manifestCachePath == "/var/lib/koala-signage/state/manifest-cache.json")
 }
 
 @Test func validatesManifestFilenamesBeforeBuildingLocalPaths() {
@@ -576,6 +577,65 @@ private func schedule(
     #expect(restored.playerID == state.playerID)
     #expect(restored.installedPlaylistID == state.installedPlaylistID)
     #expect(restored.installedPlaylistVersion == 4)
+}
+
+@Test func persistsAndRestoresTheLastValidManifest() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let cacheFile = directory.appendingPathComponent("manifest-cache.json")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let manifest = ManifestResponse(
+        playlistID: UUID(),
+        version: 7,
+        generatedAt: Date(timeIntervalSince1970: 1_784_000_000),
+        items: [],
+        schedules: [schedule(
+            name: "Desayuno",
+            startMinute: 360,
+            endMinute: 660,
+            weekdayMask: 127,
+            priority: 10
+        )]
+    )
+    let store = ManifestStore(path: cacheFile.path)
+
+    try store.save(manifest)
+
+    #expect(store.load() == manifest)
+}
+
+@Test func offlineStagingRecoversAnAssetFromAVerifiedReleaseWithoutDownloading() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let content = root.appendingPathComponent("content", isDirectory: true)
+    let staging = root.appendingPathComponent("staging", isDirectory: true)
+    let release = content.appendingPathComponent(".remote/fallback-v1", isDirectory: true)
+    try FileManager.default.createDirectory(at: release, withIntermediateDirectories: true)
+    try Data([1, 2, 3]).write(to: release.appendingPathComponent("fallback.mp4"))
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manager = try DownloadManager(
+        serverURL: "http://192.168.1.25:8080",
+        contentDirectory: content.path,
+        stagingDirectory: staging.path,
+        logger: Logger()
+    )
+    let item = ManifestItem(
+        id: UUID(), name: "Fallback", filename: "fallback.mp4",
+        relativeURL: "/media/fallback.mp4",
+        sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+        sizeBytes: 3, durationSeconds: 1, position: 0
+    )
+    let manifest = ManifestResponse(
+        playlistID: UUID(), version: 1, generatedAt: Date(), items: [item]
+    )
+
+    let summary = try await manager.stageMissingAssets(
+        from: manifest,
+        allowDownloads: false
+    )
+
+    #expect(summary == DownloadSummary(downloaded: 0, skipped: 1, failed: 0))
+    #expect(try Data(contentsOf: staging.appendingPathComponent("fallback.mp4")) == Data([1, 2, 3]))
 }
 
 @Test func restoresOnlyCompleteAndUsableRemotePlaylistState() {

@@ -22,6 +22,7 @@ struct Configuration: Decodable, Sendable {
     let manifestPollIntervalSeconds: UInt64
     let stagingDirectory: String
     let stateFilePath: String
+    let manifestCachePath: String
 
     private enum CodingKeys: String, CodingKey {
         case contentDirectory
@@ -37,6 +38,7 @@ struct Configuration: Decodable, Sendable {
         case manifestPollIntervalSeconds
         case stagingDirectory
         case stateFilePath
+        case manifestCachePath
     }
 
     init(from decoder: any Decoder) throws {
@@ -61,6 +63,11 @@ struct Configuration: Decodable, Sendable {
                 .appendingPathComponent("staging", isDirectory: true)
                 .path
         stateFilePath = try container.decode(String.self, forKey: .stateFilePath)
+        manifestCachePath = try container.decodeIfPresent(String.self, forKey: .manifestCachePath)
+            ?? URL(fileURLWithPath: stateFilePath)
+                .deletingLastPathComponent()
+                .appendingPathComponent("manifest-cache.json", isDirectory: false)
+                .path
     }
 }
 
@@ -102,7 +109,7 @@ struct PersistedState: Codable {
     }
 }
 
-struct ManifestResponse: Decodable, Equatable, Sendable {
+struct ManifestResponse: Codable, Equatable, Sendable {
     let playlistID: UUID
     let version: Int
     let generatedAt: Date
@@ -144,7 +151,7 @@ struct ManifestResponse: Decodable, Equatable, Sendable {
     }
 }
 
-struct ManifestSchedule: Decodable, Equatable, Sendable {
+struct ManifestSchedule: Codable, Equatable, Sendable {
     let id: UUID
     let name: String
     let timezone: String
@@ -157,7 +164,7 @@ struct ManifestSchedule: Decodable, Equatable, Sendable {
     let items: [ManifestItem]
 }
 
-struct ManifestItem: Decodable, Equatable, Sendable {
+struct ManifestItem: Codable, Equatable, Sendable {
     let id: UUID
     let name: String
     let filename: String
@@ -345,6 +352,38 @@ final class StateStore: @unchecked Sendable {
             )
             let data = try encoder.encode(state)
             try data.write(to: url, options: .atomic)
+        }
+    }
+}
+
+final class ManifestStore: @unchecked Sendable {
+    private let path: String
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+    private let access = CriticalSection()
+
+    init(path: String) {
+        self.path = path
+        decoder.dateDecodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    }
+
+    func load() -> ManifestResponse? {
+        access.withLock {
+            guard let data = FileManager.default.contents(atPath: path) else { return nil }
+            return try? decoder.decode(ManifestResponse.self, from: data)
+        }
+    }
+
+    func save(_ manifest: ManifestResponse) throws {
+        try access.withLock {
+            let url = URL(fileURLWithPath: path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try encoder.encode(manifest).write(to: url, options: .atomic)
         }
     }
 }
@@ -729,12 +768,18 @@ actor DownloadManager {
         self.hasher = hasher
     }
 
-    func stageMissingAssets(from manifest: ManifestResponse) async throws -> DownloadSummary {
+    func stageMissingAssets(
+        from manifest: ManifestResponse,
+        allowDownloads: Bool = true
+    ) async throws -> DownloadSummary {
         try validateAssetDefinitions(in: manifest)
-        return try await stage(items: manifest.items)
+        return try await stage(items: manifest.items, allowDownloads: allowDownloads)
     }
 
-    func stageScheduledAssets(from manifest: ManifestResponse) async throws -> DownloadSummary {
+    func stageScheduledAssets(
+        from manifest: ManifestResponse,
+        allowDownloads: Bool = true
+    ) async throws -> DownloadSummary {
         try validateAssetDefinitions(in: manifest)
         var filenames = Set<String>()
         var items: [ManifestItem] = []
@@ -744,18 +789,22 @@ actor DownloadManager {
                 items.append(item)
             }
         }
-        return try await stage(items: items)
+        return try await stage(items: items, allowDownloads: allowDownloads)
     }
 
     func stageSelectedSchedule(
         _ schedule: ManifestSchedule,
-        from manifest: ManifestResponse
+        from manifest: ManifestResponse,
+        allowDownloads: Bool = true
     ) async throws -> DownloadSummary {
         try validateAssetDefinitions(in: manifest)
-        return try await stage(items: schedule.items)
+        return try await stage(items: schedule.items, allowDownloads: allowDownloads)
     }
 
-    private func stage(items: [ManifestItem]) async throws -> DownloadSummary {
+    private func stage(
+        items: [ManifestItem],
+        allowDownloads: Bool
+    ) async throws -> DownloadSummary {
         try fileManager.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         var summary = DownloadSummary()
 
@@ -786,6 +835,20 @@ actor DownloadManager {
                     continue
                 }
 
+                if let releaseSource = try verifiedReleaseAsset(
+                    filename: filename,
+                    expectedSize: item.sizeBytes,
+                    expectedChecksum: expectedChecksum
+                ) {
+                    try fileManager.copyItem(at: releaseSource, to: stagedURL)
+                    cacheVerifiedFile(at: stagedURL, expectedChecksum: expectedChecksum)
+                    logger.log("Recovered verified asset from a local release: \(filename)")
+                    summary.skipped += 1
+                    continue
+                }
+
+                guard allowDownloads else { throw AgentError.assetNotReady(filename) }
+
                 try await download(
                     item: item,
                     filename: filename,
@@ -800,6 +863,32 @@ actor DownloadManager {
         }
 
         return summary
+    }
+
+    private func verifiedReleaseAsset(
+        filename: String,
+        expectedSize: Int64,
+        expectedChecksum: String
+    ) throws -> URL? {
+        let releasesRoot = contentDirectory.appendingPathComponent(".remote", isDirectory: true)
+        guard fileManager.fileExists(atPath: releasesRoot.path) else { return nil }
+
+        for release in try fileManager.contentsOfDirectory(
+            at: releasesRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        ) {
+            let values = try release.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { continue }
+            let candidate = release.appendingPathComponent(filename, isDirectory: false)
+            if try fileMatchesManifest(
+                at: candidate,
+                expectedSize: expectedSize,
+                expectedChecksum: expectedChecksum
+            ) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private func validateAssetDefinitions(in manifest: ManifestResponse) throws {
@@ -1210,6 +1299,7 @@ enum KoalaSignagePlayer {
             let playlistManager = PlaylistManager(config: config, logger: logger)
             let mpvManager = MPVManager(config: config, logger: logger)
             let stateStore = StateStore(path: config.stateFilePath)
+            let manifestStore = ManifestStore(path: config.manifestCachePath)
             let playbackUpdates = CriticalSection()
             let serverClient = try ServerClient(serverURL: config.serverURL)
             let downloadManager = try DownloadManager(
@@ -1280,7 +1370,21 @@ enum KoalaSignagePlayer {
                 while !Task.isCancelled {
                     if let playerID = stateStore.load().playerID {
                         do {
-                            let manifest = try await serverClient.fetchManifest(playerID: playerID)
+                            let manifestResult: (manifest: ManifestResponse, isCached: Bool)
+                            do {
+                                let fetchedManifest = try await serverClient.fetchManifest(playerID: playerID)
+                                try manifestStore.save(fetchedManifest)
+                                manifestResult = (fetchedManifest, false)
+                            } catch {
+                                guard let cachedManifest = manifestStore.load() else { throw error }
+                                manifestResult = (cachedManifest, true)
+                                logger.log(
+                                    "Manifest polling failed; evaluating cached manifest offline. "
+                                    + "Error: \(error)"
+                                )
+                            }
+                            let manifest = manifestResult.manifest
+                            let isCachedManifest = manifestResult.isCached
                             let installedState = stateStore.load()
                             let installedVersion = installedState.installedPlaylistVersion
                             let installedDescription = installedVersion.map(String.init) ?? "none"
@@ -1289,12 +1393,18 @@ enum KoalaSignagePlayer {
                                 + "installed version: \(installedDescription); items: \(manifest.items.count); "
                                 + "schedules: \(manifest.schedules.count)."
                             )
+                            if isCachedManifest {
+                                logger.log(
+                                    "Cached manifest generated at \(ISO8601DateFormatter().string(from: manifest.generatedAt))."
+                                )
+                            }
 
                             if let schedule = selectedSchedule(from: manifest.schedules, at: Date()) {
                                 logger.log("Scheduled playlist is active: \(schedule.name).")
                                 let summary = try await downloadManager.stageSelectedSchedule(
                                     schedule,
-                                    from: manifest
+                                    from: manifest,
+                                    allowDownloads: !isCachedManifest
                                 )
                                 logger.log(
                                     "Scheduled asset cache completed. Downloaded: \(summary.downloaded); "
@@ -1351,11 +1461,13 @@ enum KoalaSignagePlayer {
                                     logger.log("Installed scheduled playlist is ahead of the remote version.")
                                 }
 
-                                let prefetch = try await downloadManager.stageScheduledAssets(from: manifest)
-                                logger.log(
-                                    "Scheduled asset cache completed. Downloaded: \(prefetch.downloaded); "
-                                    + "skipped: \(prefetch.skipped); failed: \(prefetch.failed)."
-                                )
+                                if !isCachedManifest {
+                                    let prefetch = try await downloadManager.stageScheduledAssets(from: manifest)
+                                    logger.log(
+                                        "Scheduled asset cache completed. Downloaded: \(prefetch.downloaded); "
+                                        + "skipped: \(prefetch.skipped); failed: \(prefetch.failed)."
+                                    )
+                                }
                             } else {
                                 switch compareManifest(
                                     installedPlaylistID: installedState.installedPlaylistID,
@@ -1365,7 +1477,10 @@ enum KoalaSignagePlayer {
                                 ) {
                                 case .updateAvailable:
                                     logger.log("Fallback playlist selected; staging missing assets.")
-                                    let summary = try await downloadManager.stageMissingAssets(from: manifest)
+                                    let summary = try await downloadManager.stageMissingAssets(
+                                        from: manifest,
+                                        allowDownloads: !isCachedManifest
+                                    )
                                     logger.log(
                                         "Staging sync completed. Downloaded: \(summary.downloaded); "
                                         + "skipped: \(summary.skipped); failed: \(summary.failed)."
@@ -1391,7 +1506,8 @@ enum KoalaSignagePlayer {
                                         )
                                         do {
                                             let cleanup = try await downloadManager.cleanupAfterActivation(
-                                                activeRelease: release
+                                                activeRelease: release,
+                                                removeStagingEntries: !isCachedManifest
                                             )
                                             logger.log(
                                                 "Post-activation cleanup completed. Staging entries removed: "
@@ -1412,7 +1528,7 @@ enum KoalaSignagePlayer {
                                     logger.log("Installed fallback playlist is ahead of the remote version.")
                                 }
 
-                                if !manifest.schedules.isEmpty {
+                                if !isCachedManifest && !manifest.schedules.isEmpty {
                                     let summary = try await downloadManager.stageScheduledAssets(from: manifest)
                                     logger.log(
                                         "Scheduled asset cache completed. Downloaded: \(summary.downloaded); "
