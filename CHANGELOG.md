@@ -45,6 +45,7 @@ All notable changes to this project will be documented in this file.
 - MPV current-path inspection through JSON IPC
 - Current media asset reporting in Player heartbeats
 - Active playlist identity reporting in Player heartbeats
+- Per-device Bearer credentials for registration, heartbeat, and manifest requests
 
 ### Changed
 

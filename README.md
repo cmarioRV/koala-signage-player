@@ -280,6 +280,14 @@ KoalaSignagePlayer
 * [ ] Error reporting
 * [ ] Remote diagnostics
 
+## Device authentication
+
+Set `registrationToken` in the deployed configuration to the Server's
+`PLAYER_REGISTRATION_TOKEN`. Registration returns a unique device credential,
+which is persisted with mode `0600` and sent automatically with heartbeat and
+manifest requests. Deploy this Player before enabling
+`PLAYER_DEVICE_AUTH_REQUIRED=true` on the Server.
+
 ---
 
 # Screenshots

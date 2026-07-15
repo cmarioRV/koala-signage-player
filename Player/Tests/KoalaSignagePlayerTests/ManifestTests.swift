@@ -5,6 +5,24 @@ import FoundationNetworking
 import Testing
 @testable import KoalaSignagePlayer
 
+@Test func decodesRegistrationResponseWithDeviceCredential() throws {
+    let playerID = UUID()
+    let data = Data(#"{"id":"\#(playerID.uuidString)","name":"Koala Wall 01","installationID":"koala-wall-01","appVersion":"0.1.14","lastSeenAt":null,"deviceToken":"device-secret"}"#.utf8)
+    let response = try JSONDecoder().decode(PlayerResponse.self, from: data)
+
+    #expect(response.id == playerID)
+    #expect(response.deviceToken == "device-secret")
+}
+
+@Test func persistedStateKeepsDeviceCredentialAndDecodesLegacyState() throws {
+    let state = PersistedState(playerID: UUID(), deviceToken: "device-secret")
+    let encoded = try JSONEncoder().encode(state)
+    #expect(try JSONDecoder().decode(PersistedState.self, from: encoded).deviceToken == "device-secret")
+
+    let legacy = Data(#"{"playerID":null,"installedPlaylistID":null,"installedPlaylistVersion":null}"#.utf8)
+    #expect(try JSONDecoder().decode(PersistedState.self, from: legacy).deviceToken == nil)
+}
+
 private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
     override class func canInit(with request: URLRequest) -> Bool { true }
 

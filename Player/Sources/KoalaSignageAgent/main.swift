@@ -15,6 +15,7 @@ struct Configuration: Decodable, Sendable {
     let mpvSocketPath: String
     let scanIntervalSeconds: UInt64
     let serverURL: String
+    let registrationToken: String?
     let playerName: String
     let installationID: String
     let appVersion: String
@@ -31,6 +32,7 @@ struct Configuration: Decodable, Sendable {
         case mpvSocketPath
         case scanIntervalSeconds
         case serverURL
+        case registrationToken
         case playerName
         case installationID
         case appVersion
@@ -49,6 +51,7 @@ struct Configuration: Decodable, Sendable {
         mpvSocketPath = try container.decode(String.self, forKey: .mpvSocketPath)
         scanIntervalSeconds = try container.decode(UInt64.self, forKey: .scanIntervalSeconds)
         serverURL = try container.decode(String.self, forKey: .serverURL)
+        registrationToken = try container.decodeIfPresent(String.self, forKey: .registrationToken)
         playerName = try container.decode(String.self, forKey: .playerName)
         installationID = try container.decode(String.self, forKey: .installationID)
         appVersion = try container.decode(String.self, forKey: .appVersion)
@@ -84,6 +87,7 @@ struct PlayerResponse: Decodable {
     let appVersion: String?
     let lastSeenAt: Date?
     let createdAt: Date?
+    let deviceToken: String?
 }
 
 struct HeartbeatRequest: Encodable {
@@ -96,15 +100,18 @@ struct HeartbeatRequest: Encodable {
 
 struct PersistedState: Codable {
     var playerID: UUID?
+    var deviceToken: String?
     var installedPlaylistID: UUID?
     var installedPlaylistVersion: Int?
 
     init(
         playerID: UUID?,
+        deviceToken: String? = nil,
         installedPlaylistID: UUID? = nil,
         installedPlaylistVersion: Int? = nil
     ) {
         self.playerID = playerID
+        self.deviceToken = deviceToken
         self.installedPlaylistID = installedPlaylistID
         self.installedPlaylistVersion = installedPlaylistVersion
     }
@@ -364,6 +371,10 @@ final class StateStore: @unchecked Sendable {
             )
             let data = try encoder.encode(state)
             try data.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
         }
     }
 }
@@ -415,11 +426,17 @@ actor ServerClient {
         self.decoder.dateDecodingStrategy = .iso8601
     }
 
-    func register(name: String, installationID: String, appVersion: String) async throws -> PlayerResponse {
+    func register(
+        name: String,
+        installationID: String,
+        appVersion: String,
+        registrationToken: String?
+    ) async throws -> PlayerResponse {
         let url = baseURL.appending(path: "api/v1/players/register")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        setBearerAuthorization(registrationToken, on: &request)
         request.httpBody = try encoder.encode(RegisterPlayerRequest(
             name: name,
             installationID: installationID,
@@ -432,11 +449,12 @@ actor ServerClient {
         return try decoder.decode(PlayerResponse.self, from: data)
     }
 
-    func sendHeartbeat(playerID: UUID, payload: HeartbeatRequest) async throws {
+    func sendHeartbeat(playerID: UUID, deviceToken: String?, payload: HeartbeatRequest) async throws {
         let url = baseURL.appending(path: "api/v1/players/\(playerID.uuidString)/heartbeat")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        setBearerAuthorization(deviceToken, on: &request)
         request.httpBody = try encoder.encode(payload)
 
         let (_, response) = try await session.data(for: request)
@@ -444,10 +462,11 @@ actor ServerClient {
         guard http.statusCode == 204 else { throw AgentError.unexpectedStatus(http.statusCode) }
     }
 
-    func fetchManifest(playerID: UUID) async throws -> ManifestResponse {
+    func fetchManifest(playerID: UUID, deviceToken: String?) async throws -> ManifestResponse {
         let url = baseURL.appending(path: "api/v1/players/\(playerID.uuidString)/manifest")
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        setBearerAuthorization(deviceToken, on: &request)
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw AgentError.invalidResponse }
@@ -455,6 +474,11 @@ actor ServerClient {
             throw AgentError.unexpectedStatus(http.statusCode)
         }
         return try decoder.decode(ManifestResponse.self, from: data)
+    }
+
+    private func setBearerAuthorization(_ token: String?, on request: inout URLRequest) {
+        guard let token, !token.isEmpty else { return }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
 }
 
@@ -1396,9 +1420,13 @@ enum KoalaSignagePlayer {
                 let response = try await serverClient.register(
                     name: config.playerName,
                     installationID: config.installationID,
-                    appVersion: config.appVersion
+                    appVersion: config.appVersion,
+                    registrationToken: config.registrationToken
                 )
                 state.playerID = response.id
+                if let deviceToken = response.deviceToken {
+                    state.deviceToken = deviceToken
+                }
                 try stateStore.save(state)
                 logger.log("Player registered with server: \(response.id.uuidString)")
             } catch {
@@ -1417,6 +1445,7 @@ enum KoalaSignagePlayer {
                             )
                             try await serverClient.sendHeartbeat(
                                 playerID: playerID,
+                                deviceToken: installedState.deviceToken,
                                 payload: HeartbeatRequest(
                                     appVersion: config.appVersion,
                                     currentAssetID: playingAssetID,
@@ -1443,7 +1472,10 @@ enum KoalaSignagePlayer {
                         do {
                             let manifestResult: (manifest: ManifestResponse, isCached: Bool)
                             do {
-                                let fetchedManifest = try await serverClient.fetchManifest(playerID: playerID)
+                                let fetchedManifest = try await serverClient.fetchManifest(
+                                    playerID: playerID,
+                                    deviceToken: stateStore.load().deviceToken
+                                )
                                 try manifestStore.save(fetchedManifest)
                                 manifestResult = (fetchedManifest, false)
                             } catch {
