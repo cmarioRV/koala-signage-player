@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-07-15
+
 ### Fixed
 
 - Download tests no longer depend on the crashing Linux custom URLProtocol implementation

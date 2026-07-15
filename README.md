@@ -8,6 +8,9 @@ The player is built with a strong focus on reliability, recoverability, and main
 
 > **Project Status:** Version 1.0 release candidate
 
+Release scope and remaining production gates are documented in
+[`docs/releases/1.0.0-rc.1.md`](docs/releases/1.0.0-rc.1.md).
+
 ---
 
 # Koala Signage Ecosystem
