@@ -6,7 +6,7 @@ Koala Signage Player is the playback component of the **Koala Signage** ecosyste
 
 The player is built with a strong focus on reliability, recoverability, and maintainability. It controls the playback engine through **MPV's JSON IPC interface**, allowing seamless playlist updates without restarting the player.
 
-> **Project Status:** 🚧 Under active development
+> **Project Status:** Version 1.0 release candidate
 
 ---
 
@@ -16,8 +16,8 @@ The player is built with a strong focus on reliability, recoverability, and main
 Koala Signage
 
 ├── Koala Signage Player   ← This repository
-├── Koala Signage Server   ← Content management backend (planned)
-└── Koala Studio           ← Web administration interface (planned)
+├── Koala Signage Server   ← Content management and device API
+└── Koala Studio           ← Web administration interface
 ```
 
 ---
@@ -53,10 +53,7 @@ Koala Signage
 
 ## Planned
 
-* ⏳ Remote content synchronization
 * ⏳ Download retry and resume support
-* ⏳ Local content cache
-* ⏳ Health monitoring
 * ⏳ Remote diagnostics
 * ⏳ Automatic software updates
 * ⏳ Multi-screen synchronization
@@ -68,9 +65,7 @@ Koala Signage
 ```text
                  Koala Signage Server
                          │
-                  Manifest API
-                         │
-                HTTPS / WebSocket
+             HTTP device API polling
                          │
                          ▼
             Koala Signage Player
@@ -279,22 +274,22 @@ bash -n Scripts/install.sh Scripts/deploy-rpi.sh
 
 ## Phase 3 — Content Management
 
-* [ ] Local cache
-* [ ] Versioned playlists
+* [x] Local cache
+* [x] Versioned playlists
 * [x] Automatic cleanup
 
 ## Phase 4 — Scheduling
 
 * [x] Decode scheduled playlists
 * [x] Prefetch and verify scheduled assets
-* [ ] Time-based playlists
-* [ ] Campaign scheduling
-* [ ] Fallback playlists
+* [x] Time-based playlists
+* [x] Campaign scheduling
+* [x] Fallback playlists
 
 ## Phase 5 — Monitoring
 
-* [ ] Device health
-* [ ] Playback telemetry
+* [x] Device health heartbeat
+* [x] Active playlist and media telemetry
 * [ ] Error reporting
 * [ ] Remote diagnostics
 

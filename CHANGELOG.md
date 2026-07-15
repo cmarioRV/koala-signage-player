@@ -54,6 +54,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Prepared Player configuration and documentation for the `1.0.0-rc.1` release candidate
 - Heartbeats now report the locally installed playlist version when available
 - Added a macOS-compatible Unix socket type while preserving Linux behavior
 - Existing configurations default staging storage to a sibling of the content directory
@@ -62,4 +63,4 @@ All notable changes to this project will be documented in this file.
 - Player logs now write directly to standard output for immediate systemd journal visibility
 - Raspberry deployment now uses `install.sh` for provisioning and `deploy-rpi.sh` for upgrades
 - Routine deployments preserve configuration, synchronize `appVersion`, and roll back failed releases
-- Example Player version updated to 0.1.13
+- Example Player version updated to 1.0.0-rc.1

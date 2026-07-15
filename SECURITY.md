@@ -2,7 +2,9 @@
 
 ## Supported Versions
 
-Only the latest development version is currently supported.
+The latest 1.0 release candidate is supported while production acceptance is
+in progress. After the stable release, only the latest 1.x version will receive
+security fixes.
 
 ## Reporting a Vulnerability
 
