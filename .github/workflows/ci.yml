@@ -21,7 +21,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run unit tests
-        run: swift test
+        # FoundationNetworking's custom URLProtocol test transport is not safe
+        # under concurrent Swift Testing execution on x86_64 Linux.
+        run: swift test --no-parallel
 
       - name: Build release executable
         run: swift build -c release --product koala-signage-player

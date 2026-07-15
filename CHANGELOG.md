@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux CI now serializes FoundationNetworking tests to avoid a Swift runtime crash
+
 ### Added
 
 - GitHub Actions validation for Swift tests, release builds, and deployment scripts
