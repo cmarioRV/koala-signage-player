@@ -23,24 +23,17 @@ import Testing
     #expect(try JSONDecoder().decode(PersistedState.self, from: legacy).deviceToken == nil)
 }
 
-private final class MediaURLProtocolStub: URLProtocol, @unchecked Sendable {
-    override class func canInit(with request: URLRequest) -> Bool { true }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        let response = HTTPURLResponse(
-            url: request.url!,
-            statusCode: 200,
-            httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Length": "3"]
-        )!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data([0x01, 0x02, 0x03]))
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
+private func stubMediaDownload(from sourceURL: URL) async throws -> (URL, URLResponse) {
+    let temporaryURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: false)
+    try Data([0x01, 0x02, 0x03]).write(to: temporaryURL, options: .atomic)
+    let response = try #require(HTTPURLResponse(
+        url: sourceURL,
+        statusCode: 200,
+        httpVersion: "HTTP/1.1",
+        headerFields: ["Content-Length": "3"]
+    ))
+    return (temporaryURL, response)
 }
 
 private func bogotaDate(
@@ -358,15 +351,12 @@ private func schedule(
     try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
 
-    let sessionConfiguration = URLSessionConfiguration.ephemeral
-    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
-    let session = URLSession(configuration: sessionConfiguration)
     let manager = try DownloadManager(
         serverURL: "http://192.168.1.25:8080",
         contentDirectory: content.path,
         stagingDirectory: staging.path,
         logger: Logger(),
-        session: session
+        downloadOperation: stubMediaDownload
     )
     let item = ManifestItem(
         id: UUID(),
@@ -440,14 +430,12 @@ private func schedule(
     let staging = root.appendingPathComponent("staging", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
 
-    let sessionConfiguration = URLSessionConfiguration.ephemeral
-    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
     let manager = try DownloadManager(
         serverURL: "http://192.168.1.25:8080",
         contentDirectory: content.path,
         stagingDirectory: staging.path,
         logger: Logger(),
-        session: URLSession(configuration: sessionConfiguration)
+        downloadOperation: stubMediaDownload
     )
     let scheduledItem = ManifestItem(
         id: UUID(),
@@ -502,14 +490,12 @@ private func schedule(
     let staging = root.appendingPathComponent("staging", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
 
-    let sessionConfiguration = URLSessionConfiguration.ephemeral
-    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
     let manager = try DownloadManager(
         serverURL: "http://192.168.1.25:8080",
         contentDirectory: root.appendingPathComponent("content").path,
         stagingDirectory: staging.path,
         logger: Logger(),
-        session: URLSession(configuration: sessionConfiguration)
+        downloadOperation: stubMediaDownload
     )
     func item(_ filename: String) -> ManifestItem {
         ManifestItem(
@@ -600,14 +586,12 @@ private func schedule(
     try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
 
-    let sessionConfiguration = URLSessionConfiguration.ephemeral
-    sessionConfiguration.protocolClasses = [MediaURLProtocolStub.self]
     let manager = try DownloadManager(
         serverURL: "http://192.168.1.25:8080",
         contentDirectory: content.path,
         stagingDirectory: staging.path,
         logger: Logger(),
-        session: URLSession(configuration: sessionConfiguration)
+        downloadOperation: stubMediaDownload
     )
     let item = ManifestItem(
         id: UUID(),

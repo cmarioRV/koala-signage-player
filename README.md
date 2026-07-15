@@ -249,14 +249,10 @@ Equivalent local validation from the repository root:
 
 ```bash
 cd Player
-swift test --no-parallel
+swift test
 swift build -c release --product koala-signage-player
 bash -n Scripts/install.sh Scripts/deploy-rpi.sh
 ```
-
-Tests run serially because the Linux `FoundationNetworking` custom URL protocol
-used by the download tests can crash when several stubbed sessions execute
-concurrently. This does not change Player runtime concurrency.
 
 ---
 

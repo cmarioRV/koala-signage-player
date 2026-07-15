@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Linux CI now serializes FoundationNetworking tests to avoid a Swift runtime crash
+- Download tests no longer depend on the crashing Linux custom URLProtocol implementation
 
 ### Added
 

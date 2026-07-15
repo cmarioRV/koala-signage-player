@@ -813,6 +813,8 @@ func fileMatchesExpectedSize(at url: URL, expectedSize: Int64) -> Bool {
     return size.int64Value == expectedSize
 }
 
+typealias MediaDownloadOperation = @Sendable (URL) async throws -> (URL, URLResponse)
+
 actor DownloadManager {
     private struct VerifiedFileFingerprint: Equatable {
         let size: Int64
@@ -829,7 +831,7 @@ actor DownloadManager {
     private let contentDirectory: URL
     private let stagingDirectory: URL
     private let logger: Logger
-    private let session: URLSession
+    private let downloadOperation: MediaDownloadOperation
     private let fileManager: FileManager
     private let hasher: SHA256Hasher
     private var verifiedFiles: [String: VerifiedFileFingerprint] = [:]
@@ -839,7 +841,9 @@ actor DownloadManager {
         contentDirectory: String,
         stagingDirectory: String,
         logger: Logger,
-        session: URLSession = .shared,
+        downloadOperation: @escaping MediaDownloadOperation = {
+            try await URLSession.shared.download(from: $0)
+        },
         fileManager: FileManager = .default,
         hasher: SHA256Hasher = SHA256Hasher()
     ) throws {
@@ -848,7 +852,7 @@ actor DownloadManager {
         self.contentDirectory = URL(fileURLWithPath: contentDirectory, isDirectory: true)
         self.stagingDirectory = URL(fileURLWithPath: stagingDirectory, isDirectory: true)
         self.logger = logger
-        self.session = session
+        self.downloadOperation = downloadOperation
         self.fileManager = fileManager
         self.hasher = hasher
     }
@@ -1265,7 +1269,8 @@ actor DownloadManager {
         }
 
         logger.log("Downloading asset to staging: \(filename)")
-        let (temporaryURL, response) = try await session.download(from: sourceURL)
+        let (temporaryURL, response) = try await downloadOperation(sourceURL)
+        defer { try? fileManager.removeItem(at: temporaryURL) }
         guard let http = response as? HTTPURLResponse else { throw AgentError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
             throw AgentError.unexpectedStatus(http.statusCode)
