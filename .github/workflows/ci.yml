@@ -1,0 +1,30 @@
+name: Player CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Swift tests and release build
+    runs-on: ubuntu-latest
+    container: swift:6.2.4-noble
+    defaults:
+      run:
+        working-directory: Player
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run unit tests
+        run: swift test
+
+      - name: Build release executable
+        run: swift build -c release --product koala-signage-player
+
+      - name: Validate deployment scripts
+        run: bash -n Scripts/install.sh Scripts/deploy-rpi.sh

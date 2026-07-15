@@ -238,6 +238,24 @@ KoalaSignagePlayer
 
 ---
 
+# Continuous integration
+
+GitHub Actions validates every push and pull request in the same Swift 6.2
+Linux family used for deployment. The workflow runs the unit tests, builds the
+release executable, and checks the Raspberry installation scripts for shell
+syntax errors.
+
+Equivalent local validation from the repository root:
+
+```bash
+cd Player
+swift test
+swift build -c release --product koala-signage-player
+bash -n Scripts/install.sh Scripts/deploy-rpi.sh
+```
+
+---
+
 # Roadmap
 
 ## Phase 1 — Local Player

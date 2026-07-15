@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- GitHub Actions validation for Swift tests, release builds, and deployment scripts
 - Initial project structure
 - Swift Package
 - MPV integration
