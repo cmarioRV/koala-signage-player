@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-19
+
+### Changed
+
+- Promoted the onsite-accepted Player release candidate to the first stable release
+- Example production configuration now reports `1.0.0`
+
 ## [1.0.0-rc.1] - 2026-07-15
 
 ### Fixed

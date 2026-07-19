@@ -6,10 +6,10 @@ Koala Signage Player is the playback component of the **Koala Signage** ecosyste
 
 The player is built with a strong focus on reliability, recoverability, and maintainability. It controls the playback engine through **MPV's JSON IPC interface**, allowing seamless playlist updates without restarting the player.
 
-> **Project Status:** Version 1.0 release candidate
+> **Project Status:** Version 1.0 stable
 
-Release scope and remaining production gates are documented in
-[`docs/releases/1.0.0-rc.1.md`](docs/releases/1.0.0-rc.1.md).
+Release scope and production acceptance are documented in
+[`docs/releases/1.0.0.md`](docs/releases/1.0.0.md).
 
 ---
 
